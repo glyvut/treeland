@@ -35,6 +35,11 @@ IMCandidatePanelManager::IMCandidatePanelManager(
             [this](SurfaceWrapper *wrapper) {
                 m_imCandidatePanels.removeAll(wrapper);
             });
+
+    connect(m_inputMethodHelper,
+            &WAYLIB_SERVER_NAMESPACE::WInputMethodHelper::textInputCursorRectChanged,
+            this,
+            &IMCandidatePanelManager::applyInitialPositionAtCursor);
 }
 
 bool IMCandidatePanelManager::parseIMCandidatePanelProperty(
