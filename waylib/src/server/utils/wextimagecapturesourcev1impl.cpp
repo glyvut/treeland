@@ -3,6 +3,11 @@
 
 #include "wextimagecapturesourcev1impl.h"
 #include <wpointer.h>
+#include "wcursor.h"
+#include "wcursorimage.h"
+#include "wimagebuffer.h"
+#include "wseat.h"
+#include "wsurface.h"
 #include "wsurfaceitem.h"
 #include "wsgtextureprovider.h"
 #include "woutputrenderwindow.h"
@@ -28,6 +33,105 @@ WAYLIB_SERVER_BEGIN_NAMESPACE
 // WExtImageCaptureSourceV1Impl is not standard-layout (QObject base), so a
 // container_of lookup is not possible; use a registry instead.
 static QHash<wlr_ext_image_capture_source_v1 *, WExtImageCaptureSourceV1Impl *> s_captureSourceMap;
+
+// Pointer-cursor capture source for one seat, created lazily by
+// WExtImageCaptureSourceV1Impl::get_pointer_cursor(). It feeds the
+// ext_image_copy_capture_manager_v1.create_pointer_cursor_session() protocol:
+// the compositor reports cursor enter/leave/position/hotspot through the
+// embedded wlr_ext_image_capture_source_v1_cursor and produces the cursor
+// image in copy_frame().
+struct WImageCaptureCursorSource
+{
+    // The cursor's base (wlr_ext_image_capture_source_v1) is also the target
+    // for the impl callbacks, so keep a registry for the reverse lookup.
+    wlr_ext_image_capture_source_v1_cursor cursor;
+
+    wlr_seat *seat = nullptr;
+    WOutput *output = nullptr;
+    QQuickItem *surfaceItem = nullptr;
+    QPointer<WOutputRenderWindow> renderWindow;
+
+    // Rasterized cursor (compositor/bitmap cursor path). `image` is stored in
+    // device pixels; `buffer` is the wlr buffer wrapping it.
+    WCursorImage *cursorImage = nullptr;
+    QImage image;
+    QPoint hotspot;
+    WBufferDropPtr buffer;
+
+    // Client-provided cursor surface (wl_pointer.set_cursor) path. When set,
+    // its current buffer is copied directly instead of `image`.
+    QPointer<WSurface> cursorSurface;
+
+    // Frame events must be emitted on the render thread (the copy_frame
+    // implementation performs GL operations), so pending frames are deferred
+    // to the next WOutputRenderWindow::renderEnd.
+    bool framePending = false;
+
+    QMetaObject::Connection positionConnection;
+    QMetaObject::Connection visibleConnection;
+    QMetaObject::Connection cursorChangedConnection;
+    QMetaObject::Connection shapeChangedConnection;
+    QMetaObject::Connection surfaceChangedConnection;
+    QMetaObject::Connection commitConnection;
+    QMetaObject::Connection renderEndConnection;
+
+    WImageCaptureCursorSource()
+        : cursor{}
+    {
+        cursorImage = new WCursorImage;
+    }
+
+    ~WImageCaptureCursorSource()
+    {
+        disconnectConnections();
+        // Emits destroy (tearing down any live cursor sessions) and releases
+        // the base's shm/dmabuf formats.
+        wlr_ext_image_capture_source_v1_cursor_finish(&cursor);
+        delete cursorImage;
+    }
+
+    void disconnectConnections()
+    {
+        if (positionConnection)
+            QObject::disconnect(positionConnection);
+        if (visibleConnection)
+            QObject::disconnect(visibleConnection);
+        if (cursorChangedConnection)
+            QObject::disconnect(cursorChangedConnection);
+        if (shapeChangedConnection)
+            QObject::disconnect(shapeChangedConnection);
+        if (surfaceChangedConnection)
+            QObject::disconnect(surfaceChangedConnection);
+        if (commitConnection)
+            QObject::disconnect(commitConnection);
+        if (renderEndConnection)
+            QObject::disconnect(renderEndConnection);
+    }
+
+    void connectCursor();
+    void refreshImage();
+    void updatePosition();
+    void updateConstraints(int width, int height);
+    void scheduleFrame();
+    void emitFrame();
+    void emitUpdate();
+
+    static const struct wlr_ext_image_capture_source_v1_interface impl;
+    static void request_frame(struct wlr_ext_image_capture_source_v1 *source, bool schedule_frame);
+    static void copy_frame(struct wlr_ext_image_capture_source_v1 *source,
+                           wlr_ext_image_copy_capture_frame_v1 *dst_frame,
+                           wlr_ext_image_capture_source_v1_frame_event *frame_event);
+};
+
+static QHash<wlr_ext_image_capture_source_v1 *, WImageCaptureCursorSource *> s_cursorSourceMap;
+
+const struct wlr_ext_image_capture_source_v1_interface WImageCaptureCursorSource::impl = {
+    .start = nullptr,
+    .stop = nullptr,
+    .request_frame = WImageCaptureCursorSource::request_frame,
+    .copy_frame = WImageCaptureCursorSource::copy_frame,
+    .get_pointer_cursor = nullptr,
+};
 
 // Helper for constraint building
 struct ConstraintBuilder {
@@ -153,6 +257,12 @@ WExtImageCaptureSourceV1Impl::~WExtImageCaptureSourceV1Impl()
         stop();
     }
     delete m_captureRenderer;
+
+    for (auto *cs : std::as_const(m_cursorSources)) {
+        s_cursorSourceMap.remove(&cs->cursor.base);
+        delete cs;
+    }
+    m_cursorSources.clear();
 
     wlr_ext_image_capture_source_v1_finish(&source);
     s_captureSourceMap.remove(&source);
@@ -446,20 +556,316 @@ void WExtImageCaptureSourceV1Impl::copy_frame(
 }
 
 wlr_ext_image_capture_source_v1_cursor *WExtImageCaptureSourceV1Impl::get_pointer_cursor(
-    [[maybe_unused]] struct wlr_ext_image_capture_source_v1 *source, [[maybe_unused]] struct wlr_seat *seat)
+    struct wlr_ext_image_capture_source_v1 *source, struct wlr_seat *seat)
 {
     auto *self = s_captureSourceMap.value(source);
     Q_ASSERT(self);
     return self->get_pointer_cursor(seat);
 }
 
-wlr_ext_image_capture_source_v1_cursor *WExtImageCaptureSourceV1Impl::get_pointer_cursor([[maybe_unused]] wlr_seat *seat)
+void WImageCaptureCursorSource::connectCursor()
 {
-    qCDebug(lcWlImageCapture) << "WExtImageCaptureSourceV1Impl::get_pointer_cursor()";
-    // TODO: Implement cursor retrieval logic
-    // This needs to get cursor information from seat and create corresponding cursor structure
-    // Currently return nullptr to indicate no cursor information
-    return nullptr;
+    auto *wseat = WSeat::fromHandle(seat);
+    auto *wcursor = wseat ? wseat->cursor() : nullptr;
+
+    if (output)
+        cursorImage->setScale(output->scale());
+
+    if (renderWindow) {
+        // Deliver pending frames on the render thread, where copy_frame can
+        // safely create textures / run GL operations.
+        renderEndConnection = QObject::connect(renderWindow, &WOutputRenderWindow::renderEnd,
+                                               [this] {
+            if (!framePending)
+                return;
+            framePending = false;
+            emitFrame();
+        });
+    }
+
+    if (!wcursor)
+        return;
+
+    positionConnection = QObject::connect(wcursor, &WCursor::positionChanged, [this] {
+        updatePosition();
+    });
+    visibleConnection = QObject::connect(wcursor, &WCursor::visibleChanged, [this] {
+        updatePosition();
+    });
+    cursorChangedConnection = QObject::connect(wcursor, &WCursor::cursorChanged, [this] {
+        refreshImage();
+    });
+    shapeChangedConnection = QObject::connect(wcursor, &WCursor::requestedCursorShapeChanged, [this] {
+        refreshImage();
+    });
+    surfaceChangedConnection = QObject::connect(wcursor, &WCursor::requestedCursorSurfaceChanged, [this] {
+        refreshImage();
+    });
+}
+
+void WImageCaptureCursorSource::refreshImage()
+{
+    auto *wseat = WSeat::fromHandle(seat);
+    auto *wcursor = wseat ? wseat->cursor() : nullptr;
+
+    WSurface *newCursorSurface = nullptr;
+    QImage newImage;
+    QPoint newHotspot;
+    int32_t newHotX = 0;
+    int32_t newHotY = 0;
+
+    if (wcursor) {
+        const QCursor qc = wcursor->cursor();
+        if (WGlobal::isClientResourceCursor(qc)) {
+            // Client-set cursor: prefer the cursor surface, fall back to a
+            // cursor shape.
+            const auto res = wcursor->requestedCursorSurface();
+            if (auto *surf = res.first; surf && surf->buffer()) {
+                newCursorSurface = surf;
+                const int scale = surf->bufferScale();
+                newHotX = res.second.x() * scale;
+                newHotY = res.second.y() * scale;
+            } else {
+                const auto shape = wcursor->requestedCursorShape();
+                if (shape != WGlobal::CursorShape::Invalid) {
+                    cursorImage->setCursor(WCursor::toQCursor(shape));
+                    newImage = cursorImage->image();
+                    newHotspot = cursorImage->hotSpot();
+                    newHotX = newHotspot.x();
+                    newHotY = newHotspot.y();
+                }
+            }
+        } else if (!WGlobal::isInvalidCursor(qc)) {
+            cursorImage->setCursor(qc);
+            newImage = cursorImage->image();
+            newHotspot = cursorImage->hotSpot();
+            newHotX = newHotspot.x();
+            newHotY = newHotspot.y();
+        }
+    }
+
+    const bool surfaceChanged = cursorSurface != newCursorSurface;
+    cursorSurface = newCursorSurface;
+
+    const bool imageChanged = newImage.isNull() != image.isNull()
+                              || newImage.size() != image.size()
+                              || (!image.isNull() && newImage != image);
+    image = newImage;
+    hotspot = newHotspot;
+
+    if (surfaceChanged) {
+        if (commitConnection)
+            QObject::disconnect(commitConnection);
+        commitConnection = {};
+        if (cursorSurface) {
+            // A new cursor buffer may arrive on the next commit.
+            commitConnection = QObject::connect(cursorSurface, &WSurface::commit, [this] {
+                refreshImage();
+            });
+        }
+    }
+
+    const bool hotChanged = cursor.hotspot.x != newHotX || cursor.hotspot.y != newHotY;
+    cursor.hotspot.x = newHotX;
+    cursor.hotspot.y = newHotY;
+
+    // Regenerate the rasterized buffer whenever the image content changed.
+    if (imageChanged) {
+        buffer.reset();
+        if (!image.isNull())
+            buffer.reset(WImageBufferImpl::create(image));
+    }
+
+    // Refresh the constraints and notify clients about the new content.
+    const int pixelWidth = image.isNull()
+        ? (cursorSurface && cursorSurface->buffer() ? cursorSurface->buffer()->width : 0)
+        : image.width();
+    const int pixelHeight = image.isNull()
+        ? (cursorSurface && cursorSurface->buffer() ? cursorSurface->buffer()->height : 0)
+        : image.height();
+    if (pixelWidth > 0 && pixelHeight > 0
+        && (static_cast<int>(cursor.base.width) != pixelWidth
+            || static_cast<int>(cursor.base.height) != pixelHeight)) {
+        updateConstraints(pixelWidth, pixelHeight);
+    }
+
+    if (surfaceChanged || imageChanged) {
+        scheduleFrame();
+    }
+    if (hotChanged || surfaceChanged || imageChanged) {
+        emitUpdate();
+    }
+}
+
+void WImageCaptureCursorSource::updatePosition()
+{
+    auto *wseat = WSeat::fromHandle(seat);
+    auto *wcursor = wseat ? wseat->cursor() : nullptr;
+    const bool visible = wcursor && wcursor->isVisible();
+    const QPointF globalPos = wcursor ? wcursor->position() : QPointF();
+
+    bool newEntered = false;
+    int32_t newX = 0;
+    int32_t newY = 0;
+    if (visible && surfaceItem) {
+        // The surface item lives in the render window scene, which maps 1:1 to
+        // the output layout coordinate space of WCursor::position().
+        const QPointF origin = surfaceItem->mapToScene(QPointF(0, 0));
+        const QPointF rel = globalPos - origin;
+        newX = qRound(rel.x());
+        newY = qRound(rel.y());
+        newEntered = QRectF(QPointF(0, 0), surfaceItem->size()).contains(rel);
+    }
+
+    const bool enteredChanged = cursor.entered != newEntered;
+    const bool stateChanged = enteredChanged || cursor.x != newX || cursor.y != newY;
+    cursor.entered = newEntered;
+    cursor.x = newX;
+    cursor.y = newY;
+
+    if (stateChanged) {
+        emitUpdate();
+        // The cursor just entered the surface: make sure an in-flight capture
+        // has a frame to deliver.
+        if (enteredChanged && newEntered)
+            scheduleFrame();
+    }
+}
+
+void WImageCaptureCursorSource::updateConstraints(int width, int height)
+{
+    if (width <= 0 || height <= 0)
+        return;
+    ConstraintBuilder builder(&cursor.base, output);
+    builder.setSize(width, height);
+    builder.buildShmFormats();
+    builder.buildDmabufFormats();
+    builder.apply();
+}
+
+void WImageCaptureCursorSource::scheduleFrame()
+{
+    if (framePending)
+        return;
+    framePending = true;
+    if (output)
+        wlr_output_update_needs_frame(output->handle());
+}
+
+void WImageCaptureCursorSource::emitFrame()
+{
+    if (cursor.base.width <= 0 || cursor.base.height <= 0)
+        return;
+    WPixmanRegion full(0, 0, cursor.base.width, cursor.base.height);
+    wlr_ext_image_capture_source_v1_frame_event event {
+        .damage = full.get(),
+    };
+    wl_signal_emit_mutable(&cursor.base.events.frame, &event);
+}
+
+void WImageCaptureCursorSource::emitUpdate()
+{
+    wl_signal_emit_mutable(&cursor.events.update, nullptr);
+}
+
+void WImageCaptureCursorSource::request_frame(struct wlr_ext_image_capture_source_v1 *source, bool schedule_frame)
+{
+    auto *self = s_cursorSourceMap.value(source);
+    if (!self)
+        return;
+    if (!schedule_frame)
+        return;
+    // The cursor image can be produced on the next render pass; request it.
+    self->scheduleFrame();
+}
+
+void WImageCaptureCursorSource::copy_frame(struct wlr_ext_image_capture_source_v1 *source,
+                                           wlr_ext_image_copy_capture_frame_v1 *dst_frame,
+                                           [[maybe_unused]] wlr_ext_image_capture_source_v1_frame_event *frame_event)
+{
+    auto *self = s_cursorSourceMap.value(source);
+    if (!self) {
+        wlr_ext_image_copy_capture_frame_v1_fail(dst_frame,
+            EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED);
+        return;
+    }
+
+    auto renderer = self->output ? self->output->renderer() : nullptr;
+    if (!renderer) {
+        qCWarning(lcWlImageCapture) << "WImageCaptureCursorSource: no renderer available";
+        wlr_ext_image_copy_capture_frame_v1_fail(dst_frame,
+            EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN);
+        return;
+    }
+
+    wlr_buffer *src = nullptr;
+    bool surfacePath = false;
+    if (self->cursorSurface && self->cursorSurface->buffer()) {
+        src = self->cursorSurface->buffer();
+        surfacePath = true;
+        wlr_buffer_lock(src);
+    } else if (self->buffer) {
+        src = self->buffer.get();
+    }
+
+    if (!src) {
+        qCDebug(lcWlImageCapture) << "WImageCaptureCursorSource: no cursor image available";
+        wlr_ext_image_copy_capture_frame_v1_fail(dst_frame,
+            EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED);
+        return;
+    }
+
+    // Buffer size mismatch: update constraints and let the client retry.
+    if (static_cast<int>(source->width) != src->width
+        || static_cast<int>(source->height) != src->height) {
+        self->updateConstraints(src->width, src->height);
+        if (static_cast<int>(source->width) != src->width
+            || static_cast<int>(source->height) != src->height) {
+            if (surfacePath)
+                wlr_buffer_unlock(src);
+            wlr_ext_image_copy_capture_frame_v1_fail(dst_frame,
+                EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS);
+            return;
+        }
+    }
+
+    const bool ok = wlr_ext_image_copy_capture_frame_v1_copy_buffer(dst_frame, src, renderer);
+    if (surfacePath)
+        wlr_buffer_unlock(src);
+
+    if (!ok)
+        return;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    wlr_ext_image_copy_capture_frame_v1_ready(dst_frame, WL_OUTPUT_TRANSFORM_NORMAL, &now);
+    qCDebug(lcWlImageCapture) << "WImageCaptureCursorSource: cursor frame copied";
+}
+
+wlr_ext_image_capture_source_v1_cursor *WExtImageCaptureSourceV1Impl::get_pointer_cursor(wlr_seat *seat)
+{
+    if (!seat)
+        return nullptr;
+
+    if (auto *existing = m_cursorSources.value(seat))
+        return &existing->cursor;
+
+    auto *cs = new WImageCaptureCursorSource;
+    cs->seat = seat;
+    cs->output = m_output;
+    cs->surfaceItem = m_surfaceItem.get();
+    cs->renderWindow = renderWindow();
+
+    wlr_ext_image_capture_source_v1_cursor_init(&cs->cursor, &WImageCaptureCursorSource::impl);
+    s_cursorSourceMap.insert(&cs->cursor.base, cs);
+    m_cursorSources.insert(seat, cs);
+
+    cs->connectCursor();
+    cs->updatePosition();
+    cs->refreshImage();
+
+    qCDebug(lcWlImageCapture) << "WExtImageCaptureSourceV1Impl::get_pointer_cursor() created for seat" << seat;
+    return &cs->cursor;
 }
 
 WAYLIB_SERVER_END_NAMESPACE

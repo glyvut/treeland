@@ -8,6 +8,7 @@
 #include <wlr_fwd.h>
 #include <wpointer.h>
 
+#include <QHash>
 #include <QObject>
 #include <QPointer>
 #include <QQuickItem>
@@ -17,6 +18,10 @@ WAYLIB_SERVER_BEGIN_NAMESPACE
 class WOutput;
 class WOutputRenderWindow;
 class WBufferRenderer;
+
+// Pointer-cursor capture source for one seat, defined in the .cpp. The impl
+// owns one per seat, created lazily by get_pointer_cursor().
+struct WImageCaptureCursorSource;
 
 class WAYLIB_SERVER_EXPORT WExtImageCaptureSourceV1Impl : public QObject
 {
@@ -54,6 +59,10 @@ private Q_SLOTS:
 
 private:
     wlr_ext_image_capture_source_v1 source;
+
+    // One pointer-cursor capture source per seat, lazily created by
+    // get_pointer_cursor() and owned by this object.
+    QHash<wlr_seat *, WImageCaptureCursorSource *> m_cursorSources;
 
     WOutputRenderWindow *renderWindow() const;
     qreal computeDpr() const;
