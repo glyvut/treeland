@@ -1087,9 +1087,17 @@ void ShellHandler::onSurfaceInactivationRequested(SurfaceWrapper *wrapper)
             // TODO(multi-seat): non-primary seats should also perform focus fallback once
             // per-seat workspace stacking is supported.
             if (seat == primarySeat) {
-                helper->activateSurface(m_workspace->current()->latestActiveSurface(),
-                                        Qt::OtherFocusReason,
-                                        seat);
+                if (wrapper->isWindowAnimationRunning()) {
+                    connect(wrapper,
+                            &SurfaceWrapper::hideAnimationFinished,
+                            this,
+                            &ShellHandler::onWindowHideAnimationFinished,
+                            Qt::SingleShotConnection);
+                } else {
+                    helper->activateSurface(m_workspace->current()->latestActiveSurface(),
+                                            Qt::OtherFocusReason,
+                                            seat);
+                }
             } else {
                 helper->requestKeyboardFocus(nullptr, Qt::OtherFocusReason, seat);
             }
@@ -1102,6 +1110,24 @@ void ShellHandler::onSurfaceInactivationRequested(SurfaceWrapper *wrapper)
             helper->setActivatedSurface(nullptr, seat);
         }
     }
+}
+
+void ShellHandler::onWindowHideAnimationFinished()
+{
+    auto *helper = Helper::instance();
+    if (!helper)
+        return;
+
+    auto *primarySeat = helper->seat();
+    auto *seatContainer = helper->rootSurfaceContainer()->getSeatContainer(primarySeat);
+    if (!seatContainer || seatContainer->keyboardFocusSurface() != nullptr)
+        return;
+
+    // Fall back to the most recently active surface, mirroring the immediate
+    // path in onSurfaceInactivationRequested but only after the close animation.
+    helper->activateSurface(m_workspace->current()->latestActiveSurface(),
+                            Qt::OtherFocusReason,
+                            primarySeat);
 }
 
 void ShellHandler::setupSurfaceActiveWatcher(SurfaceWrapper *wrapper)

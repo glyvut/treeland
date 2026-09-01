@@ -1733,6 +1733,8 @@ void SurfaceWrapper::onHideAnimationFinished()
     }
 
     onWindowAnimationFinished();
+
+    Q_EMIT hideAnimationFinished();
 }
 
 void SurfaceWrapper::onMappedChanged()

@@ -380,6 +380,7 @@ Q_SIGNALS:
     void clientRequstPosChanged();
     void blurChanged();
     void windowAnimationRunningChanged();
+    void hideAnimationFinished();
     void coverEnabledChanged();
     void aboutToBeInvalidated();
     void isActivatedChanged();
