@@ -88,7 +88,7 @@ void WOutputViewportPrivate::updateRenderBufferSource()
         sources.append(extraRenderSource);
 
     forceRender = true;
-    bufferRenderer->setSourceList(sources, true);
+    bufferRenderer->setSourceList(sources, hideSource);
 }
 
 void WOutputViewportPrivate::setExtraRenderSource(QQuickItem *source)
@@ -265,6 +265,23 @@ void WOutputViewport::setCacheBuffer(bool newCacheBuffer)
 {
     W_D(WOutputViewport);
     d->bufferRenderer->setCacheBuffer(newCacheBuffer);
+}
+
+bool WOutputViewport::hideSource() const
+{
+    W_DC(WOutputViewport);
+    return d->hideSource;
+}
+
+void WOutputViewport::setHideSource(bool newHideSource)
+{
+    W_D(WOutputViewport);
+    if (d->hideSource == newHideSource)
+        return;
+    d->hideSource = newHideSource;
+    if (d->output)
+        d->updateRenderBufferSource();
+    Q_EMIT hideSourceChanged();
 }
 
 WGlobal::ColorContentsMode WOutputViewport::colorContentsMode() const

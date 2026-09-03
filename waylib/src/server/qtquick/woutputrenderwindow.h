@@ -17,6 +17,7 @@ class WOutputViewport;
 class WOutputLayer;
 class WBufferRenderer;
 class WOutputHelper;
+class WOffscreenWindow;
 class WOutputRenderWindowPrivate;
 class WAYLIB_SERVER_EXPORT WOutputRenderWindow : public QQuickWindow, public QQmlParserStatus
 {
@@ -42,6 +43,9 @@ public:
                 WOutputViewport *mapFrom, QQuickItem *mapTo);
     void detach(WOutputLayer *layer, WOutputViewport *output);
 
+    void attach(WOffscreenWindow *window);
+    void detach(WOffscreenWindow *window);
+
     WOutputHelper *getOutputHelper(WOutputViewport *output) const;
 
     // TODO: Deprecate these convenience methods in favor of getOutputHelper() + setExtraState()
@@ -56,6 +60,8 @@ public:
     qreal width() const;
     qreal height() const;
     WBufferRenderer *currentRenderer() const;
+    void pushRenderer(WBufferRenderer *renderer);
+    void clearRenderers();
     bool inRendering() const;
 
     void setRenderEnabled(bool enabled);

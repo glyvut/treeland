@@ -10,6 +10,7 @@
 #include "wbackend.h"
 #include "woutputviewport.h"
 #include "woutputviewport_p.h"
+#include "woffscreenwindow.h"
 #include "wqmlhelper_p.h"
 #include "woutputlayer.h"
 #include "wbufferrenderer_p.h"
@@ -463,6 +464,7 @@ public:
 
     QList<OutputHelper*> outputs;
     QList<OutputLayer*> layers;
+    QList<WOffscreenWindow*> offscreenWindows;
     bool disableLayers = false;
 
     QOpenGLContext *glContext = nullptr;
@@ -1568,6 +1570,9 @@ void WOutputRenderWindowPrivate::doRender(wlr_output *needsFrameOutput,
 
     auto needsCommit = doRenderOutputs(needsFrameOutput, outputs, forceRender);
 
+    for (WOffscreenWindow *window : std::as_const(offscreenWindows))
+        window->renderContent();
+
     Q_EMIT q->afterRendering();
     runAndClearJobs(&afterRenderingJobs);
 
@@ -1753,6 +1758,21 @@ void WOutputRenderWindow::detach(WOutputViewport *output)
     }
 }
 
+void WOutputRenderWindow::attach(WOffscreenWindow *window)
+{
+    Q_D(WOutputRenderWindow);
+    if (d->offscreenWindows.contains(window))
+        return;
+
+    d->offscreenWindows.append(window);
+}
+
+void WOutputRenderWindow::detach(WOffscreenWindow *window)
+{
+    Q_D(WOutputRenderWindow);
+    d->offscreenWindows.removeOne(window);
+}
+
 void WOutputRenderWindow::attach(WOutputLayer *layer, WOutputViewport *output)
 {
     Q_D(WOutputRenderWindow);
@@ -1925,6 +1945,18 @@ WBufferRenderer *WOutputRenderWindow::currentRenderer() const
 {
     Q_D(const WOutputRenderWindow);
     return d->rendererList.isEmpty() ? nullptr : d->rendererList.top();
+}
+
+void WOutputRenderWindow::pushRenderer(WBufferRenderer *renderer)
+{
+    Q_D(WOutputRenderWindow);
+    d->pushRenderer(renderer);
+}
+
+void WOutputRenderWindow::clearRenderers()
+{
+    Q_D(WOutputRenderWindow);
+    d->rendererList.clear();
 }
 
 bool WOutputRenderWindow::inRendering() const

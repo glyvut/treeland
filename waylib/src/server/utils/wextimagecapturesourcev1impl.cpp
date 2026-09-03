@@ -3,7 +3,7 @@
 
 #include "wextimagecapturesourcev1impl.h"
 #include <wpointer.h>
-#include "wsurfaceitem.h"
+#include "wtextureproviderprovider.h"
 #include "wsgtextureprovider.h"
 #include "woutputrenderwindow.h"
 #include "woutput.h"
@@ -120,43 +120,36 @@ const struct wlr_ext_image_capture_source_v1_interface WExtImageCaptureSourceV1I
     .get_pointer_cursor = WExtImageCaptureSourceV1Impl::get_pointer_cursor,
 };
 
-WExtImageCaptureSourceV1Impl::WExtImageCaptureSourceV1Impl(WSurfaceItemContent *surfaceContent, WOutput *output)
-    : QObject(surfaceContent) // TODO: Check if Qt object tree destruction timing is appropriate
-    , m_surfaceContent(surfaceContent)
+WExtImageCaptureSourceV1Impl::WExtImageCaptureSourceV1Impl(WTextureProviderProvider *provider,
+                                                           const QSize &pixelSize,
+                                                           WOutput *output,
+                                                           QObject *parent)
+    : QObject(parent)
+    , m_provider(provider)
+    , m_pixelSize(pixelSize)
     , m_output(output)
     , m_capturing(false)
     , m_renderEndConnection()
 {
-    Q_ASSERT(m_surfaceContent);
+    Q_ASSERT(m_provider);
+    Q_ASSERT(m_output);
 
     // Initialize wlr_ext_image_capture_source_v1
     wlr_ext_image_capture_source_v1_init(&source, &impl);
     s_captureSourceMap.insert(&source, this);
 
-    // Get actual surface size and set constraints directly
-    auto surface = m_surfaceContent->surface();
-    if (surface && surface->handle()) {
-        auto wlr_surface = surface->handle();
-        int width = wlr_surface->current.width;
-        int height = wlr_surface->current.height;
+    if (m_pixelSize.width() > 0 && m_pixelSize.height() > 0) {
+        ConstraintBuilder builder(&source, m_output);
+        builder.setSize(m_pixelSize.width(), m_pixelSize.height());
+        builder.buildShmFormats();
+        builder.buildDmabufFormats();
+        builder.apply();
 
-        // Validate dimensions before setting constraints
-        if (width > 0 && height > 0) {
-            // Use constraint builder helper directly
-            ConstraintBuilder builder(&source, m_output);
-            builder.setSize(width, height);
-            builder.buildShmFormats();
-            builder.buildDmabufFormats();
-            builder.apply();
-
-            qCDebug(lcWlImageCapture) << "Initial constraints set successfully:";
-            qCDebug(lcWlImageCapture) << "  - Width:" << width;
-            qCDebug(lcWlImageCapture) << "  - Height:" << height;
-        } else {
-            qCWarning(lcWlImageCapture) << "Invalid surface dimensions for constraints:" << width << "x" << height;
-        }
+        qCDebug(lcWlImageCapture) << "Initial constraints set successfully:";
+        qCDebug(lcWlImageCapture) << "  - Width:" << m_pixelSize.width();
+        qCDebug(lcWlImageCapture) << "  - Height:" << m_pixelSize.height();
     } else {
-        qCWarning(lcWlImageCapture) << "No valid surface available for setting initial constraints";
+        qCWarning(lcWlImageCapture) << "Invalid surface dimensions for constraints:" << m_pixelSize;
     }
 }
 
@@ -187,13 +180,13 @@ void WExtImageCaptureSourceV1Impl::start(bool with_cursors)
     // which means multiple render listeners for the same surface. Consider implementing
     // a manager to share render events among multiple capture sources.
 
-    if (!m_surfaceContent) {
-        qCWarning(lcWlImageCapture) << "No surface content available for capture";
+    if (!m_provider) {
+        qCWarning(lcWlImageCapture) << "No provider available for capture";
         return;
     }
 
     // Get render window
-    auto textureProvider = m_surfaceContent->wTextureProvider();
+    auto textureProvider = m_provider->wTextureProvider();
     if (!textureProvider) {
         qCWarning(lcWlImageCapture) << "No texture provider available for start";
         return;
@@ -257,8 +250,8 @@ void WExtImageCaptureSourceV1Impl::schedule_frame(bool schedule_frame)
         return;
     }
 
-    if (!m_surfaceContent) {
-        qCWarning(lcWlImageCapture) << "No surface content available for frame scheduling";
+    if (!m_provider) {
+        qCWarning(lcWlImageCapture) << "No provider available for frame scheduling";
         return;
     }
 
@@ -268,7 +261,7 @@ void WExtImageCaptureSourceV1Impl::schedule_frame(bool schedule_frame)
     }
 
     // Get render window to check if currently rendering
-    auto textureProvider = m_surfaceContent->wTextureProvider();
+    auto textureProvider = m_provider->wTextureProvider();
     if (textureProvider) {
         auto renderWindow = textureProvider->window();
         if (renderWindow && !renderWindow->inRendering()) {
@@ -288,8 +281,19 @@ void WExtImageCaptureSourceV1Impl::handleRenderEnd()
         return;
     }
 
-    // Get surface size and validate it
-    QSize surfaceSize = m_surfaceContent->size().toSize();
+    if (!m_provider) {
+        qCWarning(lcWlImageCapture) << "No provider available for frame event";
+        return;
+    }
+
+    // Get surface size and validate it. Prefer the current buffer size so the
+    // damage region tracks window resizes even when m_pixelSize is stale.
+    QSize surfaceSize = m_pixelSize;
+    if (auto textureProvider = m_provider->wTextureProvider()) {
+        if (auto buffer = textureProvider->wlrBuffer())
+            surfaceSize = QSize(buffer->width, buffer->height);
+    }
+
     if (surfaceSize.width() <= 0 || surfaceSize.height() <= 0) {
         qCWarning(lcWlImageCapture) << "Invalid surface size for damage region:" << surfaceSize;
         return;
@@ -327,14 +331,14 @@ void WExtImageCaptureSourceV1Impl::copy_frame(wlr_ext_image_copy_capture_frame_v
         return;
     }
 
-    if (!m_surfaceContent) {
-        qCWarning(lcWlImageCapture) << "No surface content available for frame copy";
+    if (!m_provider) {
+        qCWarning(lcWlImageCapture) << "No provider available for frame copy";
         wlr_ext_image_copy_capture_frame_v1_fail(dst_frame, EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN);
         return;
     }
 
     // Get texture provider
-    auto textureProvider = m_surfaceContent->wTextureProvider();
+    auto textureProvider = m_provider->wTextureProvider();
     if (!textureProvider) {
         qCWarning(lcWlImageCapture) << "No texture provider available";
         wlr_ext_image_copy_capture_frame_v1_fail(dst_frame, EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN);

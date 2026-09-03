@@ -8,17 +8,21 @@
 #include <wlr_all.h>
 
 #include <QObject>
+#include <QSize>
 
 WAYLIB_SERVER_BEGIN_NAMESPACE
 
-class WSurfaceItemContent;
+class WTextureProviderProvider;
 class WOutput;
 
 class WAYLIB_SERVER_EXPORT WExtImageCaptureSourceV1Impl : public QObject
 {
     Q_OBJECT
 public:
-    explicit WExtImageCaptureSourceV1Impl(WSurfaceItemContent *surfaceContent, WOutput *output);
+    explicit WExtImageCaptureSourceV1Impl(WTextureProviderProvider *provider,
+                                          const QSize &pixelSize,
+                                          WOutput *output,
+                                          QObject *parent = nullptr);
     ~WExtImageCaptureSourceV1Impl();
 
     wlr_ext_image_capture_source_v1 *handle() { return &source; }
@@ -46,7 +50,8 @@ private Q_SLOTS:
 private:
     wlr_ext_image_capture_source_v1 source;
 
-    QPointer<WSurfaceItemContent> m_surfaceContent;
+    WTextureProviderProvider *m_provider;
+    QSize m_pixelSize;
     WOutput *m_output;
     bool m_capturing;
     QMetaObject::Connection m_renderEndConnection;

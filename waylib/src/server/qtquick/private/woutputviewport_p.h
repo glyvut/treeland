@@ -23,6 +23,7 @@ public:
         , offscreen(false)
         , colorContentsMode(WGlobal::ColorContentsMode::DontCare)
         , live(true)
+        , hideSource(true)
         , forceRender(false)
         , ignoreViewport(false)
         , disableHardwareLayers(false)
@@ -84,6 +85,7 @@ public:
     uint offscreen:1;
     WGlobal::ColorContentsMode colorContentsMode;
     uint live:1;
+    uint hideSource:1;
     uint forceRender:1;
     uint ignoreViewport:1;
     uint disableHardwareLayers:1;

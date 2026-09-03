@@ -35,6 +35,7 @@ class WAYLIB_SERVER_EXPORT WBufferRenderer : public QQuickItem
     friend class WOutputRenderWindow;
     friend class WOutputRenderWindowPrivate;
     friend class OutputHelper;
+    friend class WOffscreenWindow;
     Q_OBJECT
 
 public:

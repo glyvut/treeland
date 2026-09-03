@@ -84,6 +84,7 @@
 #include <woutputmanagerv1.h>
 #include <woutputrenderwindow.h>
 #include <woutputviewport.h>
+#include <woffscreenwindow.h>
 #include <wpointerconstraintsv1.h>
 #include <wqmlcreator.h>
 #include <wquickcursor.h>
@@ -3655,30 +3656,29 @@ void Helper::handleNewForeignToplevelCaptureRequest(wlr_ext_foreign_toplevel_ima
         return;
     }
 
-    WSurfaceItem *surfaceItem = surfaceWrapper->surfaceItem();
-    if (!surfaceItem) {
-        qCWarning(lcTlCapture) << "Could not get WSurfaceItem from SurfaceWrapper";
-        return;
-    }
-
-    WSurfaceItemContent *surfaceContent = surfaceItem->findItemContent();
-    if (!surfaceContent) {
-        qCWarning(lcTlCapture) << "Could not find WSurfaceItemContent";
-        return;
-    }
-
-    qCDebug(lcTlCapture) << "Found WSurfaceItemContent for capture:"
-             << "size=" << surfaceContent->size()
-             << "implicitSize=" << QSizeF(surfaceContent->implicitWidth(), surfaceContent->implicitHeight())
-             << "isTextureProvider=" << surfaceContent->isTextureProvider();
-
     auto *output = surfaceWrapper->ownsOutput()->output();
     if (!output) {
         qCWarning(lcTlCapture) << "Could not get WOutput from SurfaceWrapper";
         return;
     }
 
-    auto *imageCaptureSource = new WExtImageCaptureSourceV1Impl(surfaceContent, output);
+    auto *offscreenWindow = new WOffscreenWindow(m_renderWindow->contentItem());
+    offscreenWindow->setSource(surfaceWrapper);
+    offscreenWindow->setOutput(output);
+    offscreenWindow->setDevicePixelRatio(output->scale());
+    m_renderWindow->attach(offscreenWindow);
+    QObject::connect(surfaceWrapper, &QObject::destroyed,
+                     offscreenWindow, &QObject::deleteLater);
+
+    qCDebug(lcTlCapture) << "Created WOffscreenWindow for capture:"
+             << "size=" << surfaceWrapper->size()
+             << "pixelSize=" << offscreenWindow->pixelSize()
+             << "devicePixelRatio=" << offscreenWindow->devicePixelRatio();
+
+    auto *imageCaptureSource = new WExtImageCaptureSourceV1Impl(offscreenWindow,
+                                                                offscreenWindow->pixelSize(),
+                                                                output,
+                                                                offscreenWindow);
 
     bool success = wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request_accept(
         request, imageCaptureSource->handle());
@@ -3686,6 +3686,7 @@ void Helper::handleNewForeignToplevelCaptureRequest(wlr_ext_foreign_toplevel_ima
     if (!success) {
         qCWarning(lcTlCapture) << "Failed to accept foreign toplevel image capture request";
         delete imageCaptureSource;
+        offscreenWindow->deleteLater();
     }
 }
 

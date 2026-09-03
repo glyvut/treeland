@@ -137,6 +137,7 @@ set(SOURCES
     qtquick/woutputhelper.cpp
     qtquick/woutputrenderwindow.cpp
     qtquick/woutputviewport.cpp
+    qtquick/woffscreenwindow.cpp
     qtquick/woutputitem.cpp
     qtquick/woutputlayoutitem.cpp
     qtquick/wquickoutputlayout.cpp
@@ -260,6 +261,7 @@ set(HEADERS
     qtquick/wquickoutputlayout.h
     qtquick/woutputrenderwindow.h
     qtquick/woutputviewport.h
+    qtquick/woffscreenwindow.h
     qtquick/woutputitem.h
     qtquick/wquickcursor.h
     qtquick/wquickobserver.h
