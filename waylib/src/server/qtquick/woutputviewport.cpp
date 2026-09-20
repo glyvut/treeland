@@ -88,7 +88,7 @@ void WOutputViewportPrivate::updateRenderBufferSource()
         sources.append(extraRenderSource);
 
     forceRender = true;
-    bufferRenderer->setSourceList(sources, true);
+    bufferRenderer->setSourceList(sources, hideSource);
 }
 
 void WOutputViewportPrivate::setExtraRenderSource(QQuickItem *source)
@@ -267,6 +267,23 @@ void WOutputViewport::setCacheBuffer(bool newCacheBuffer)
     d->bufferRenderer->setCacheBuffer(newCacheBuffer);
 }
 
+bool WOutputViewport::hideSource() const
+{
+    W_DC(WOutputViewport);
+    return d->hideSource;
+}
+
+void WOutputViewport::setHideSource(bool newHideSource)
+{
+    W_D(WOutputViewport);
+    if (d->hideSource == newHideSource)
+        return;
+    d->hideSource = newHideSource;
+    if (d->output)
+        d->updateRenderBufferSource();
+    Q_EMIT hideSourceChanged();
+}
+
 WGlobal::ColorContentsMode WOutputViewport::colorContentsMode() const
 {
     W_DC(WOutputViewport);
@@ -381,6 +398,27 @@ void WOutputViewport::setTargetRect(const QRectF &newTargetRect)
 void WOutputViewport::resetTargetRect()
 {
     setTargetRect({});
+}
+
+QSize WOutputViewport::renderPixelSize() const
+{
+    W_DC(WOutputViewport);
+    return d->renderPixelSize;
+}
+
+void WOutputViewport::setRenderPixelSize(const QSize &newRenderPixelSize)
+{
+    W_D(WOutputViewport);
+    if (d->renderPixelSize == newRenderPixelSize)
+        return;
+    d->renderPixelSize = newRenderPixelSize;
+    d->update();
+    Q_EMIT renderPixelSizeChanged();
+}
+
+void WOutputViewport::resetRenderPixelSize()
+{
+    setRenderPixelSize(QSize());
 }
 
 QTransform WOutputViewport::sourceRectToTargetRectTransfrom() const

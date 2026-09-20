@@ -24,10 +24,12 @@ class WAYLIB_SERVER_EXPORT WOutputViewport : public QQuickItem, public virtual W
     Q_PROPERTY(qreal devicePixelRatio READ devicePixelRatio WRITE setDevicePixelRatio NOTIFY devicePixelRatioChanged)
     Q_PROPERTY(bool offscreen READ offscreen WRITE setOffscreen NOTIFY offscreenChanged)
     Q_PROPERTY(bool cacheBuffer READ cacheBuffer WRITE setCacheBuffer NOTIFY cacheBufferChanged FINAL)
+    Q_PROPERTY(bool hideSource READ hideSource WRITE setHideSource NOTIFY hideSourceChanged FINAL)
     Q_PROPERTY(WGlobal::ColorContentsMode colorContentsMode READ colorContentsMode WRITE setColorContentsMode NOTIFY colorContentsModeChanged FINAL)
     Q_PROPERTY(bool live READ live WRITE setLive NOTIFY liveChanged FINAL)
     Q_PROPERTY(QRectF sourceRect READ sourceRect WRITE setSourceRect RESET resetSourceRect NOTIFY sourceRectChanged FINAL)
     Q_PROPERTY(QRectF targetRect READ targetRect WRITE setTargetRect RESET resetTargetRect NOTIFY targetRectChanged FINAL)
+    Q_PROPERTY(QSize renderPixelSize READ renderPixelSize WRITE setRenderPixelSize RESET resetRenderPixelSize NOTIFY renderPixelSizeChanged FINAL)
     Q_PROPERTY(bool ignoreViewport READ ignoreViewport WRITE setIgnoreViewport NOTIFY ignoreViewportChanged FINAL)
     Q_PROPERTY(bool disableHardwareLayers READ disableHardwareLayers WRITE setDisableHardwareLayers NOTIFY disableHardwareLayersChanged FINAL)
     Q_PROPERTY(bool ignoreSoftwareLayers READ ignoreSoftwareLayers WRITE setIgnoreSoftwareLayers NOTIFY ignoreSoftwareLayersChanged FINAL)
@@ -66,6 +68,13 @@ public:
     bool cacheBuffer() const;
     void setCacheBuffer(bool newCacheBuffer);
 
+    // If false, the input item keeps being rendered normally on the outputs it
+    // appears on (e.g. for capture viewports that must not hide the captured
+    // window). If true (the default), the input is hidden from the normal
+    // rendering, like ShaderEffectSource::hideSource.
+    bool hideSource() const;
+    void setHideSource(bool newHideSource);
+
     WGlobal::ColorContentsMode colorContentsMode() const;
     void setColorContentsMode(WGlobal::ColorContentsMode mode);
 
@@ -80,6 +89,15 @@ public:
     QRectF targetRect() const;
     void setTargetRect(const QRectF &newTargetRect);
     void resetTargetRect();
+
+    // Overrides the pixel size of the buffer this viewport renders into.
+    // By default (invalid size) the buffer follows the size of the output,
+    // which is what normal (output-composited) viewports need. Viewports that
+    // render into a buffer consumed directly by other means (e.g. an
+    // ext-image-capture source) can set an explicit pixel size.
+    QSize renderPixelSize() const;
+    void setRenderPixelSize(const QSize &newRenderPixelSize);
+    void resetRenderPixelSize();
 
     QTransform sourceRectToTargetRectTransfrom() const;
     QMatrix4x4 renderMatrix() const;
@@ -111,6 +129,7 @@ Q_SIGNALS:
     void devicePixelRatioChanged();
     void offscreenChanged();
     void cacheBufferChanged();
+    void hideSourceChanged();
     void colorContentsModeChanged();
     void outputRenderInitialized();
     void inputChanged();
@@ -119,6 +138,7 @@ Q_SIGNALS:
     void viewportTransformChanged();
     void sourceRectChanged();
     void targetRectChanged();
+    void renderPixelSizeChanged();
     void ignoreViewportChanged();
     void disableHardwareLayersChanged();
     void ignoreSoftwareLayersChanged();
