@@ -171,10 +171,23 @@ void RootSurfaceContainer::addOutput(Output *output)
             continue;
         updateSurfaceOutputs(s);
     }
+
+    // A DPMS wake re-enables the output without re-adding it, so the loop
+    // above does not run. Re-evaluate surfaces when the output comes back to
+    // restore their output association (and frame pacing output). Queued
+    // because the signal may be emitted from inside a render pass.
+    disconnect(output->output(), &WOutput::enabledChanged,
+               this, &RootSurfaceContainer::onOutputEnabledChanged);
+    connect(output->output(), &WOutput::enabledChanged,
+            this, &RootSurfaceContainer::onOutputEnabledChanged,
+            Qt::QueuedConnection);
 }
 
 void RootSurfaceContainer::removeOutput(Output *output)
 {
+    disconnect(output->output(), &WOutput::enabledChanged,
+               this, &RootSurfaceContainer::onOutputEnabledChanged);
+
     m_outputModel->removeObject(output);
     SurfaceContainer::removeOutput(output);
 
@@ -475,6 +488,19 @@ void RootSurfaceContainer::updateSurfaceOutputs(SurfaceWrapper *surface)
 
     if (auto *ws = Helper::instance()->workspace())
         ws->updateSurfaceOwnsOutput(surface);
+}
+
+void RootSurfaceContainer::onOutputEnabledChanged()
+{
+    auto *output = qobject_cast<WOutput *>(sender());
+    if (!output || !output->isEnabled())
+        return;
+
+    for (auto *surface : std::as_const(surfaces())) {
+        if (surface->type() == SurfaceWrapper::Type::Layer)
+            continue;
+        updateSurfaceOutputs(surface);
+    }
 }
 
 static qreal pointToRectMinDistance(const QPointF &pos, const QRectF &rect)

@@ -1241,8 +1241,6 @@ void Helper::onOutputTestOrApply(wlr_output_configuration_v1 *config, bool onlyT
             [self,
              config,
              extraState,
-             renderWindow,
-             viewport,
              output = QPointer<WOutput>(state.output),
              outputPosition,
              enabled](bool success, WOutputHelper::ExtraState committedState) {
@@ -1260,17 +1258,6 @@ void Helper::onOutputTestOrApply(wlr_output_configuration_v1 *config, bool onlyT
                         }
                     }
                     self->onOutputCommitFinished(config, success);
-                    if (success && committedState) {
-                        bool wasStateOnlyCommit = (committedState->committed & (WLR_OUTPUT_STATE_MODE |
-                                                                                WLR_OUTPUT_STATE_SCALE |
-                                                                                WLR_OUTPUT_STATE_TRANSFORM |
-                                                                                WLR_OUTPUT_STATE_ENABLED)) &&
-                                                  !(committedState->committed & WLR_OUTPUT_STATE_BUFFER);
-                        bool isDisable = (committedState->committed & WLR_OUTPUT_STATE_ENABLED) && !committedState->enabled;
-                        if (wasStateOnlyCommit && !isDisable) {
-                            renderWindow->update(viewport);
-                        }
-                    }
                 } else {
                     qCWarning(lcTlCore) << "Commit callback received unexpected state pointer!"
                                             << "Expected:" << extraState.get()
@@ -1281,13 +1268,16 @@ void Helper::onOutputTestOrApply(wlr_output_configuration_v1 *config, bool onlyT
             WOutputHelper::AfterCommitStage
         );
         m_pendingOutputConfig.pendingCommits++;
-        renderWindow->update(viewport);
 
-        // Special handling for disabled → enabled transition
-        // wlroots doesn't send frame events for disabled outputs,
-        // so we need to force render to trigger the commit
+        // A disabled output never receives frame events, so schedule_frame()
+        // alone cannot flush a pending enable state; force a render in that
+        // case. Otherwise a scheduled frame is enough. The content repaint
+        // after the state-only commit is driven by WOutputHelper when the
+        // output reports enabledChanged.
         if (state.enabled && !state.output->isEnabled()) {
             renderWindow->render(viewport, true);
+        } else {
+            renderWindow->update(viewport);
         }
     }
 }

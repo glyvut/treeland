@@ -46,6 +46,20 @@ public:
             if (renderHelper)
                 renderHelper->setSize(this->output->size());
         }, Qt::QueuedConnection); // reset buffer on later, because it's rendering
+
+        // A disabled output never receives frame events, so a client (or the
+        // compositor itself) that turned it back on would keep showing the stale
+        // front buffer: the enable commit clears needs_frame, and a clean scene
+        // makes doRenderOutputs skip the output, so no renderEnd is emitted and
+        // clients waiting for a frame callback stall until unrelated damage
+        // happens. Mark the content dirty and request a frame once the output is
+        // enabled again so the real content is repainted.
+        // Queued: the enable commit may run inside doRender, and the dirty flag
+        // set here would otherwise be cleared by resetState() in the same pass.
+        QObject::connect(output, &WOutput::enabledChanged, qq, [this] {
+            if (this->output->isEnabled())
+                update();
+        }, Qt::QueuedConnection);
     }
 
     ~WOutputHelperPrivate() {
