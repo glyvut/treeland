@@ -9,24 +9,35 @@
 
 #include <QObject>
 #include <QPointer>
+#include <QTimer>
 
 WAYLIB_SERVER_BEGIN_NAMESPACE
 
 class WOutput;
 class WOutputViewport;
+struct ClientDestroyGuard;
 
 // Implements a wlr_ext_image_capture_source_v1 on top of a WOutputViewport.
 // The viewport renders the captured item subtree (e.g. a whole toplevel with
 // its subsurfaces and decorations) into its own dedicated buffer, and this
 // class forwards the viewport's buffers as capture frames.
+//
+// The impl lives while the client's wl_resource lives: waylib-side reclamation
+// happens when the capturing client disconnects (client destroy listener) or
+// when the viewport itself is destroyed.
 class WAYLIB_SERVER_EXPORT WExtImageCaptureSourceV1Impl : public QObject
 {
     Q_OBJECT
 public:
-    explicit WExtImageCaptureSourceV1Impl(WOutputViewport *viewport, QObject *parent = nullptr);
+    explicit WExtImageCaptureSourceV1Impl(WOutputViewport *viewport, wl_client *client,
+                                          QObject *parent = nullptr);
     ~WExtImageCaptureSourceV1Impl();
 
     wlr_ext_image_capture_source_v1 *handle() { return &source; }
+
+    // Reclaims this impl (and the viewport) when the capturing client goes
+    // away; invoked from the wl_client destroy listener.
+    void handleClientDestroyed();
 
 private:
     static const struct wlr_ext_image_capture_source_v1_interface impl;
@@ -55,6 +66,9 @@ private:
 
     QPointer<WOutputViewport> m_viewport;
     WOutput *m_output;
+    wl_client *m_client;
+    struct ClientDestroyGuard *m_clientDestroyGuard;
+    QTimer *m_idleReclaimTimer;
     bool m_capturing;
     QMetaObject::Connection m_renderEndConnection;
 };

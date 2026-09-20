@@ -3788,9 +3788,17 @@ void Helper::handleNewForeignToplevelCaptureRequest(wlr_ext_foreign_toplevel_ima
     viewport->setOffscreen(true); // never commit the capture buffer to the output
     viewport->setIgnoreViewport(true); // render the input subtree in item-local coordinates
     viewport->setHideSource(false); // keep the window visible on screen while capturing
+    // The capture source reads the viewport's buffer through the texture
+    // provider; cacheBuffer keeps the provider tracking every rendered buffer.
+    viewport->setCacheBuffer(true);
 
     const auto updateGeometry = [viewport, surfaceWrapper, output]() {
         const QRectF bounds = surfaceWrapper->boundingRect();
+        if (bounds.isEmpty()) {
+            // Unmapped/minimized: keep the current geometry, the next
+            // boundingRectChanged will restore the capture geometry.
+            return;
+        }
         viewport->setSourceRect(bounds);
         const qreal scale = output->scale();
         const QSize pixelSize(qRound(bounds.width() * scale), qRound(bounds.height() * scale));
@@ -3811,7 +3819,7 @@ void Helper::handleNewForeignToplevelCaptureRequest(wlr_ext_foreign_toplevel_ima
              << "pixelSize=" << viewport->renderPixelSize()
              << "devicePixelRatio=" << viewport->devicePixelRatio();
 
-    auto *imageCaptureSource = new WExtImageCaptureSourceV1Impl(viewport);
+    auto *imageCaptureSource = new WExtImageCaptureSourceV1Impl(viewport, request->client);
 
     bool success = wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request_accept(
         request, imageCaptureSource->handle());

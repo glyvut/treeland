@@ -72,6 +72,10 @@ public:
     // appears on (e.g. for capture viewports that must not hide the captured
     // window). If true (the default), the input is hidden from the normal
     // rendering, like ShaderEffectSource::hideSource.
+    //
+    // Toggling after setOutput() re-attaches the whole source list (and with
+    // it the effect-item references); set it before the viewport starts
+    // rendering whenever possible.
     bool hideSource() const;
     void setHideSource(bool newHideSource);
 
