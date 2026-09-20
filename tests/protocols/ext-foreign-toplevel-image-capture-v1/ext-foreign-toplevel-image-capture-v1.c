@@ -84,6 +84,7 @@ static const struct xdg_wm_base_listener wm_base_listener = {
 
 static void xdg_surface_configure(void *data, struct xdg_surface *surface, uint32_t serial)
 {
+    (void)surface;
     struct xdg_toplevel_client *toplevel = data;
     toplevel->configure_serial = serial;
     toplevel->configured = 1;
@@ -147,6 +148,7 @@ static int wait_configured(struct capture_client *client)
 static struct wl_buffer *make_solid_buffer(struct wl_shm *shm, int width, int height,
                                            uint32_t argb, size_t *size_out)
 {
+    (void)size_out;
     const size_t size = (size_t)width * 4 * height;
     char name[64];
     snprintf(name, sizeof(name), "/ext_capture_win_%d_%d", (int)getpid(), width * height);
@@ -261,6 +263,7 @@ static void toplevel_handle_title(void *data,
 {
     (void)data;
     (void)handle;
+    (void)title;
 }
 
 static void toplevel_handle_app_id(void *data,
@@ -307,6 +310,7 @@ static void toplevel_list_toplevel(void *data,
                                    struct ext_foreign_toplevel_list_v1 *list,
                                    struct ext_foreign_toplevel_handle_v1 *handle)
 {
+    (void)list;
     struct capture_client *client = data;
     if (!client->toplevel_handle) {
         client->toplevel_handle = handle;
@@ -335,6 +339,7 @@ static void session_buffer_size(void *data,
                                 struct ext_image_copy_capture_session_v1 *session,
                                 uint32_t width, uint32_t height)
 {
+    (void)session;
     struct capture_client *client = data;
     client->buffer_width = width;
     client->buffer_height = height;
@@ -345,6 +350,7 @@ static void session_shm_format(void *data,
                                struct ext_image_copy_capture_session_v1 *session,
                                uint32_t format)
 {
+    (void)session;
     struct capture_client *client = data;
     /* prefer ARGB8888, then anything offered */
     if (!client->have_shm_format || format == WL_SHM_FORMAT_ARGB8888)
@@ -373,11 +379,13 @@ static void session_dmabuf_format(void *data,
 
 static void session_done(void *data, struct ext_image_copy_capture_session_v1 *session)
 {
+    (void)session;
     ((struct capture_client *)data)->session_done = 1;
 }
 
 static void session_stopped(void *data, struct ext_image_copy_capture_session_v1 *session)
 {
+    (void)session;
     ((struct capture_client *)data)->session_stopped = 1;
 }
 
@@ -427,12 +435,14 @@ static void frame_presentation_time(void *data,
 
 static void frame_ready(void *data, struct ext_image_copy_capture_frame_v1 *frame)
 {
+    (void)frame;
     ((struct capture_client *)data)->frame_ready = 1;
 }
 
 static void frame_failed(void *data, struct ext_image_copy_capture_frame_v1 *frame,
                          uint32_t reason)
 {
+    (void)frame;
     struct capture_client *client = data;
     client->frame_failed = 1;
     client->frame_fail_reason = reason;
