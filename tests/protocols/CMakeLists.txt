@@ -17,7 +17,6 @@ set(TREELAND_PROTOCOL_TEST_DSG_DATA_DIRS
 include(${CMAKE_CURRENT_SOURCE_DIR}/framework/ProtocolTest.cmake)
 
 add_subdirectory(drm)
-add_subdirectory(ext-foreign-toplevel-image-capture-v1)
 add_subdirectory(input-method-unstable-v2)
 add_subdirectory(virtual-keyboard-unstable-v1)
 add_subdirectory(wlr-data-control-unstable-v1)

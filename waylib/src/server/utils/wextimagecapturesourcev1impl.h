@@ -8,30 +8,23 @@
 #include <wlr_all.h>
 
 #include <QObject>
-#include <QPointer>
 
 WAYLIB_SERVER_BEGIN_NAMESPACE
 
+class WSurfaceItemContent;
 class WOutput;
-class WOutputViewport;
 
-// Implements a wlr_ext_image_capture_source_v1 on top of a WOutputViewport.
-// The viewport renders the captured item subtree (e.g. a whole toplevel with
-// its subsurfaces and decorations) into its own dedicated buffer, and this
-// class forwards the viewport's buffers as capture frames.
 class WAYLIB_SERVER_EXPORT WExtImageCaptureSourceV1Impl : public QObject
 {
     Q_OBJECT
 public:
-    explicit WExtImageCaptureSourceV1Impl(WOutputViewport *viewport, QObject *parent = nullptr);
+    explicit WExtImageCaptureSourceV1Impl(WSurfaceItemContent *surfaceContent, WOutput *output);
     ~WExtImageCaptureSourceV1Impl();
 
     wlr_ext_image_capture_source_v1 *handle() { return &source; }
 
 private:
     static const struct wlr_ext_image_capture_source_v1_interface impl;
-    QSize currentPixelSize() const;
-    void updateConstraints();
     void start(bool with_cursors);
     void stop();
     void schedule_frame(bool schedule_frame);
@@ -53,7 +46,7 @@ private Q_SLOTS:
 private:
     wlr_ext_image_capture_source_v1 source;
 
-    QPointer<WOutputViewport> m_viewport;
+    QPointer<WSurfaceItemContent> m_surfaceContent;
     WOutput *m_output;
     bool m_capturing;
     QMetaObject::Connection m_renderEndConnection;
