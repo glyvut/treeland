@@ -120,41 +120,10 @@ const struct wlr_ext_image_capture_source_v1_interface WExtImageCaptureSourceV1I
     .get_pointer_cursor = WExtImageCaptureSourceV1Impl::get_pointer_cursor,
 };
 
-// Watches the lifetime of the capturing client. wlroots only unlinks the
-// source wl_resource when the client destroys it (no event), so client
-// disconnection is the only reclamation hook available besides our own
-// destruction; without it the viewport/OutputHelper pair would accumulate
-// for every capture source a short-lived client ever created.
-struct ClientDestroyGuard
-{
-    wl_listener listener;
-    QPointer<WExtImageCaptureSourceV1Impl> impl;
-};
-
-namespace {
-
-void clientDestroyNotify(wl_listener *listener, void *data)
-{
-    (void)data;
-    ClientDestroyGuard *guard =
-        wl_container_of(listener, guard, listener);
-    wl_list_remove(&guard->listener.link);
-    wl_list_init(&guard->listener.link);
-    WExtImageCaptureSourceV1Impl *impl = guard->impl.data();
-    delete guard;
-    if (impl)
-        impl->handleClientDestroyed();
-}
-
-}
-
-WExtImageCaptureSourceV1Impl::WExtImageCaptureSourceV1Impl(WOutputViewport *viewport, wl_client *client,
-                                                           QObject *parent)
+WExtImageCaptureSourceV1Impl::WExtImageCaptureSourceV1Impl(WOutputViewport *viewport, QObject *parent)
     : QObject(parent ? parent : viewport)
     , m_viewport(viewport)
     , m_output(viewport ? viewport->output() : nullptr)
-    , m_client(client)
-    , m_clientDestroyGuard(nullptr)
     , m_capturing(false)
     , m_renderEndConnection()
 {
@@ -164,29 +133,6 @@ WExtImageCaptureSourceV1Impl::WExtImageCaptureSourceV1Impl(WOutputViewport *view
     // Initialize wlr_ext_image_capture_source_v1
     wlr_ext_image_capture_source_v1_init(&source, &impl);
     s_captureSourceMap.insert(&source, this);
-
-    if (m_client) {
-        m_clientDestroyGuard = new ClientDestroyGuard{
-            {}, this
-        };
-        m_clientDestroyGuard->listener.notify = clientDestroyNotify;
-        wl_client_add_destroy_listener(m_client, &m_clientDestroyGuard->listener);
-    }
-
-    // wlroots does not emit any event when the client destroys its source
-    // wl_resource (it only unlinks it), and the C source must outlive active
-    // sessions. Poll for the fully-abandoned state (no resource, no session)
-    // to reclaim the viewport/OutputHelper pair; the check is a single
-    // wl_list test every few seconds while idle.
-    m_idleReclaimTimer = new QTimer(this);
-    m_idleReclaimTimer->setInterval(5000);
-    connect(m_idleReclaimTimer, &QTimer::timeout, this, [this] {
-        if (m_capturing || !wl_list_empty(&source.resources))
-            return;
-        qCDebug(lcWlImageCapture) << "Capture source fully abandoned, reclaiming viewport";
-        deleteLater();
-    });
-    m_idleReclaimTimer->start();
 
     // Track pixel size changes of the viewport (window resized, output scale
     // changed, ...) and forward them as constraints_update to the clients.
@@ -238,28 +184,12 @@ WExtImageCaptureSourceV1Impl::~WExtImageCaptureSourceV1Impl()
     if (m_capturing) {
         qCDebug(lcWlImageCapture) << "WExtImageCaptureSourceV1Impl destroyed while capturing";
     }
-    if (m_clientDestroyGuard) {
-        if (!wl_list_empty(&m_clientDestroyGuard->listener.link))
-            wl_list_remove(&m_clientDestroyGuard->listener.link);
-        delete m_clientDestroyGuard;
-        m_clientDestroyGuard = nullptr;
-    }
     if (m_renderEndConnection) {
         disconnect(m_renderEndConnection);
         m_renderEndConnection = QMetaObject::Connection();
     }
     wlr_ext_image_capture_source_v1_finish(&source);
     s_captureSourceMap.remove(&source);
-}
-
-void WExtImageCaptureSourceV1Impl::handleClientDestroyed()
-{
-    m_clientDestroyGuard = nullptr;
-    // The client (and its source resource) is gone; reclaim the viewport and
-    // the OutputHelper attached to it.
-    if (m_idleReclaimTimer)
-        m_idleReclaimTimer->stop();
-    deleteLater();
 }
 
 void WExtImageCaptureSourceV1Impl::start(struct wlr_ext_image_capture_source_v1 *source, bool with_cursors)
@@ -370,14 +300,8 @@ void WExtImageCaptureSourceV1Impl::schedule_frame(bool schedule_frame)
     }
 
     if (schedule_frame) {
-        // Request output update to ensure next frame will be rendered. The
-        // update triggers waylib's needs_frame wiring, which schedules the
-        // frame on the output.
+        // Request output update to ensure next frame will be rendered
         wlr_output_update_needs_frame(m_output->handle());
-        // TODO: Frames are driven by the output's render loop; when the owning
-        // output is disabled (e.g. screen off) capture freezes silently until
-        // the output is enabled again. The viewport owns its swapchain, so a
-        // self-driven frame timer could decouple capture from the output.
     }
 
     auto renderWindow = m_viewport->outputRenderWindow();
