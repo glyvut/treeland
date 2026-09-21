@@ -3785,24 +3785,18 @@ void Helper::handleNewForeignToplevelCaptureRequest(wlr_ext_foreign_toplevel_ima
         return;
     }
 
-    WSurfaceItemContent *surfaceContent = surfaceItem->findItemContent();
-    if (!surfaceContent) {
-        qCWarning(lcTlCapture) << "Could not find WSurfaceItemContent";
-        return;
-    }
-
-    qCDebug(lcTlCapture) << "Found WSurfaceItemContent for capture:"
-             << "size=" << surfaceContent->size()
-             << "implicitSize=" << QSizeF(surfaceContent->implicitWidth(), surfaceContent->implicitHeight())
-             << "isTextureProvider=" << surfaceContent->isTextureProvider();
-
     auto *output = surfaceWrapper->ownsOutput()->output();
     if (!output) {
         qCWarning(lcTlCapture) << "Could not get WOutput from SurfaceWrapper";
         return;
     }
 
-    auto *imageCaptureSource = new WExtImageCaptureSourceV1Impl(surfaceContent, output);
+    // The implementation captures the whole window subtree (title bar + client
+    // surface + subsurfaces + border) with a standalone renderer that never
+    // touches the physical output: no needs_frame, no schedule_frame, no
+    // output commits. Snapshot frames are produced inside the compositor's
+    // natural render passes only.
+    auto *imageCaptureSource = new WExtImageCaptureSourceV1Impl(surfaceItem, output, request->client);
 
     bool success = wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request_accept(
         request, imageCaptureSource->handle());
