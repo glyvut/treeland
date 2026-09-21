@@ -106,7 +106,6 @@ extern "C" void ext_capture_query_state(void *data)
 extern "C" void ext_capture_render_end_delta(void *data)
 {
     auto *state = static_cast<ext_capture_render_delta *>(data);
-    auto *helper = Helper::instance();
     // Flush queued events first: any capture-induced update would schedule a
     // frame and be accounted before this probe returns.
     QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
