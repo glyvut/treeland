@@ -66,6 +66,7 @@ private:
 
     QPointer<WOutputViewport> m_viewport;
     WOutput *m_output;
+    wl_client *m_client;
     struct ClientDestroyGuard *m_clientDestroyGuard;
     QTimer *m_idleReclaimTimer;
     bool m_capturing;

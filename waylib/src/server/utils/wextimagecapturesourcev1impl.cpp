@@ -153,6 +153,7 @@ WExtImageCaptureSourceV1Impl::WExtImageCaptureSourceV1Impl(WOutputViewport *view
     : QObject(parent ? parent : viewport)
     , m_viewport(viewport)
     , m_output(viewport ? viewport->output() : nullptr)
+    , m_client(client)
     , m_clientDestroyGuard(nullptr)
     , m_capturing(false)
     , m_renderEndConnection()
@@ -164,12 +165,12 @@ WExtImageCaptureSourceV1Impl::WExtImageCaptureSourceV1Impl(WOutputViewport *view
     wlr_ext_image_capture_source_v1_init(&source, &impl);
     s_captureSourceMap.insert(&source, this);
 
-    if (client) {
+    if (m_client) {
         m_clientDestroyGuard = new ClientDestroyGuard{
             {}, this
         };
         m_clientDestroyGuard->listener.notify = clientDestroyNotify;
-        wl_client_add_destroy_listener(client, &m_clientDestroyGuard->listener);
+        wl_client_add_destroy_listener(m_client, &m_clientDestroyGuard->listener);
     }
 
     // wlroots does not emit any event when the client destroys its source
@@ -183,8 +184,6 @@ WExtImageCaptureSourceV1Impl::WExtImageCaptureSourceV1Impl(WOutputViewport *view
         if (m_capturing || !wl_list_empty(&source.resources))
             return;
         qCDebug(lcWlImageCapture) << "Capture source fully abandoned, reclaiming viewport";
-        if (m_viewport)
-            m_viewport->deleteLater();
         deleteLater();
     });
     m_idleReclaimTimer->start();
