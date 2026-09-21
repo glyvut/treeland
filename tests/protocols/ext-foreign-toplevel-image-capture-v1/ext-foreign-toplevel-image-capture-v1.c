@@ -16,6 +16,9 @@
 #include "xdg-decoration-unstable-v1-client-protocol.h"
 
 #include <fcntl.h>
+#include <poll.h>
+#include <errno.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -535,9 +538,64 @@ static int wait_session_done(struct capture_client *client)
     return client->session_done && client->have_size && client->have_shm_format;
 }
 
+/* Deadline helper for event waits: returns current CLOCK_MONOTONIC time in
+ * milliseconds. Waiting is poll-based with an absolute deadline so slow
+ * software-rendering environments (CI containers, llvmpipe) are not bounded
+ * by roundtrip speed — a single composited frame there can take hundreds of
+ * milliseconds while roundtrips complete in microseconds. */
+static int64_t wait_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* Pump already-buffered wayland events without blocking; returns the number
+ * of events dispatched, or -1 on connection error. */
+static int pump_pending(struct wl_display *display)
+{
+    int dispatched = 0;
+    while (wl_display_prepare_read(display) != 0) {
+        if (wl_display_dispatch_pending(display) < 0)
+            return -1;
+        dispatched++;
+    }
+    /* Nothing buffered; release the read lock. The caller polls the fd and
+     * dispatches when it becomes readable. */
+    wl_display_cancel_read(display);
+    return dispatched;
+}
+
+/* Wait (poll + dispatch) until any of the two flag variables becomes
+ * non-zero or the deadline in ms elapses. Returns 1 when a flag was set,
+ * 0 on timeout, -1 on error. */
+static int wait_flag_on_socket(struct wl_display *display, const volatile int *flag1,
+                               const volatile int *flag2, int timeout_ms)
+{
+    const int64_t deadline = wait_now_ms() + timeout_ms;
+    while (!*flag1 && !*flag2) {
+        if (pump_pending(display) < 0)
+            return -1;
+        if (*flag1 || *flag2)
+            return 1;
+        struct pollfd pfd = { .fd = wl_display_get_fd(display), .events = POLLIN };
+        const int pret = poll(&pfd, 1, 100);
+        if (pret < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (pret > 0 && wl_display_dispatch(display) < 0)
+            return -1;
+        if (wait_now_ms() > deadline)
+            return 0;
+    }
+    return 1;
+}
+
 /* Returns 1 when one capture frame completes with a ready event. The snapshot
- * is only produced inside natural compositor frames, so a bounded number of
- * dispatches is waited out instead of forcing a render. */
+ * is produced inside natural compositor frames; the wait is deadline-based
+ * (see wait_flag_on_socket) so slow CI environments are handled. */
 static int capture_one_frame(struct capture_client *client)
 {
     struct ext_image_copy_capture_frame_v1 *frame =
@@ -555,16 +613,13 @@ static int capture_one_frame(struct capture_client *client)
     ext_image_copy_capture_frame_v1_capture(frame);
     wl_display_flush(client->connection.display);
 
-    int waited = 0;
-    while (!client->frame_ready && !client->frame_failed && waited < 200) {
-        if (wl_display_dispatch(client->connection.display) < 0)
-            return 0;
-        waited++;
-    }
+    const int wret = wait_flag_on_socket(client->connection.display,
+                                         &client->frame_ready, &client->frame_failed,
+                                         5000);
     ext_image_copy_capture_frame_v1_destroy(frame);
     if (!client->frame_ready) {
-        fprintf(stderr, "capture frame not ready after %d dispatches (failed=%d reason=%u)\n",
-                waited, client->frame_failed, client->frame_fail_reason);
+        fprintf(stderr, "capture frame not ready within deadline (failed=%d reason=%u wret=%d)\n",
+                client->frame_failed, client->frame_fail_reason, wret);
         return 0;
     }
     return 1;
@@ -817,16 +872,15 @@ static int capture_output_frame(struct capture_client *client, struct output_fra
     wl_display_flush(client->connection.display);
     wl_buffer_destroy(buffer);
 
-    int waited = 0;
-    while (!sc.ready && !sc.failed && waited < 300) {
-        if (wl_display_roundtrip(client->connection.display) < 0)
-            goto fail;
-        waited++;
-    }
+    /* Deadline-based wait (see wait_flag_on_socket): a commit with the
+     * attach_render lock held must arrive; slow CI environments may need
+     * hundreds of ms per composited frame. */
+    const int wret = wait_flag_on_socket(client->connection.display,
+                                         &sc.ready, &sc.failed, 5000);
     zwlr_screencopy_frame_v1_destroy(frame);
     if (!sc.ready) {
-        fprintf(stderr, "output screencopy: no ready event after %d roundtrips (failed=%d)\n",
-                waited, sc.failed);
+        fprintf(stderr, "output screencopy: no ready event within deadline (failed=%d wret=%d)\n",
+                sc.failed, wret);
         free_output_frame(out);
         return 0;
     }
