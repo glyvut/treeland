@@ -361,8 +361,8 @@ void WExtImageCaptureSourceV1Impl::announceFrame()
     auto *tp = m_renderer ? m_renderer->wTextureProvider() : nullptr;
     if (!tp || !tp->wlrBuffer())
         return;
-    if (static_cast<uint32_t>(pixelSize.width()) != tp->wlrBuffer()->width
-        || static_cast<uint32_t>(pixelSize.height()) != tp->wlrBuffer()->height) {
+    if (tp->wlrBuffer()->width != static_cast<uint32_t>(pixelSize.width())
+        || tp->wlrBuffer()->height != static_cast<uint32_t>(pixelSize.height())) {
         return;
     }
 
