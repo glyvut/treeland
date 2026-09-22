@@ -182,12 +182,43 @@ static void runWhenTreelandConfigInitialized(TreelandConfig *config,
                                              QObject *context,
                                              std::function<void()> callback)
 {
-    if (config->isInitializeSucceeded()) {
+    // The DConfig initialization can fail in minimal environments (protocol
+    // test fixtures without a full DConfig daemon), in which case neither
+    // the success nor any failure handler would fire and the queued callback
+    // would never run. Fall back to a bounded retry so output restore still
+    // happens with generated defaults.
+    if (config->isInitializeSucceeded() || DConfigManager::instance()->isInitializeFailed()) {
         callback();
         return;
     }
 
+    auto *contextCopy = new QPointer<QObject>(context);
+    auto *timer = new QTimer(config);
+    timer->setInterval(500);
+    int retries = 0;
+    QObject::connect(timer, &QTimer::timeout, config, [config, contextCopy, timer, callback, retries]() mutable {
+        if (config->isInitializeSucceeded()
+            || config->isInitializeFailed()
+            || DConfigManager::instance()->isInitializeFailed()
+            || ++retries > 10) {
+            timer->stop();
+            timer->deleteLater();
+            if (contextCopy->isNull()) {
+                delete contextCopy;
+                return;
+            }
+            delete contextCopy;
+            callback();
+            return;
+        }
+    });
     QObject::connect(config, &TreelandConfig::configInitializeSucceed, context, callback);
+    QObject::connect(config, &QObject::destroyed, config, [contextCopy, timer] {
+        timer->stop();
+        timer->deleteLater();
+        delete contextCopy;
+    });
+    timer->start();
 }
 
 static bool hasSavedOutputState(OutputConfig *config)

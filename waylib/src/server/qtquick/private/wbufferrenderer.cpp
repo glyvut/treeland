@@ -452,6 +452,11 @@ void WBufferRenderer::render(int sourceIndex, const QMatrix4x4 &renderMatrix,
 
     const auto &source = m_sourceList.at(sourceIndex);
     QSGRenderer *renderer = ensureRenderer(sourceIndex, state.context);
+    if (Q_UNLIKELY(!renderer)) {
+        state.renderer = nullptr;
+        state.batchRenderer = nullptr;
+        return;
+    }
     auto wd = QQuickWindowPrivate::get(window());
 
     const qreal devicePixelRatio = state.devicePixelRatio;
@@ -628,7 +633,7 @@ void WBufferRenderer::render(int sourceIndex, const QMatrix4x4 &renderMatrix,
                 }
             }
 
-            if (!isRootItem(source.source))
+            if (!isRootItem(source.source) && state.renderer)
                 applyTransform(softwareRenderer, state.worldTransform.inverted().toTransform());
             wlr_damage_ring_add(m_damageRing.get(), scaledFlushDamage);
         }
@@ -798,6 +803,16 @@ QSGRenderer *WBufferRenderer::ensureRenderer(int sourceIndex, QSGRenderContext *
         return d.renderer;
 
     auto rootNode = WQmlHelper::getRootNode(d.source);
+    if (Q_UNLIKELY(!rootNode)) {
+        // Without the item's QSGRootNode there is no isolated subtree to
+        // render: falling through would render the WHOLE window scene into
+        // this buffer (wrong content, plus dirty-state theft from the main
+        // render). Bail out loudly instead; callers detect the null current
+        // renderer and skip this frame.
+        qCWarning(lcWlBufferRenderer) << "WBufferRenderer: no QSGRootNode for source item"
+                                      << d.source << "- skipping render";
+        return nullptr;
+    }
     Q_ASSERT(rootNode);
 
     auto dr = qobject_cast<QSGDefaultRenderContext*>(rc);

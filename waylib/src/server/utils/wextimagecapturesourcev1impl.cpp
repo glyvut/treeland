@@ -359,10 +359,10 @@ void WExtImageCaptureSourceV1Impl::announceFrame()
     // right after a resize the old-size buffer is silently skipped and the
     // client keeps the previous frame until the new snapshot arrives.
     auto *tp = m_renderer ? m_renderer->wTextureProvider() : nullptr;
-    const wlr_buffer *snapshot = tp ? tp->wlrBuffer() : nullptr;
-    if (!snapshot)
+    if (!tp || !tp->wlrBuffer())
         return;
-    if (snapshot->width != pixelSize.width() || snapshot->height != pixelSize.height()) {
+    if (static_cast<uint32_t>(pixelSize.width()) != tp->wlrBuffer()->width
+        || static_cast<uint32_t>(pixelSize.height()) != tp->wlrBuffer()->height) {
         return;
     }
 

@@ -826,9 +826,16 @@ static int capture_output_frame(struct capture_client *client, struct output_fra
         return 0;
     memset(out, 0, sizeof(*out));
     zwlr_screencopy_frame_v1_add_listener(frame, &sc_listener, &sc);
-    if (wl_display_roundtrip(client->connection.display) < 0 || !sc.buffer_seen
-        || !sc.frame.width || !sc.frame.height || !sc.frame.stride)
+    if (wl_display_roundtrip(client->connection.display) < 0)
         goto fail;
+    if (!sc.buffer_seen) {
+        fprintf(stderr, "output screencopy: no buffer event (output disabled?)\n");
+        goto fail;
+    }
+    if (!sc.frame.width || !sc.frame.height || !sc.frame.stride) {
+        fprintf(stderr, "output screencopy: invalid buffer geometry\n");
+        goto fail;
+    }
 
     const size_t size = (size_t)sc.frame.stride * sc.frame.height;
     char name[64];
@@ -994,6 +1001,32 @@ static int verify_subtree_pixels(const struct capture_client *client,
         fprintf(stderr,
                 "window misplaced in the capture: green block at (%u,%u), expected (%u,%u)\n",
                 gx, gy, expected_gx, expected_gy);
+        /* Dump the capture frame for post-analysis. */
+        const char *dumpDir = getenv("EXT_CAPTURE_DUMP_DIR");
+        if (dumpDir) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/capture-misplaced.bmp", dumpDir);
+            FILE *fp = fopen(path, "wb");
+            if (fp) {
+                const uint32_t w = client->buffer_width, h = client->buffer_height;
+                const uint32_t stride = (w * 4 + 3) & ~3u;
+                const uint32_t dataSize = stride * h;
+                const uint32_t fileSize = 54 + dataSize;
+                const uint16_t ppm = 2835;
+                uint8_t hdr[54] = { 'B','M' };
+                memcpy(hdr + 2, &fileSize, 4); hdr[10] = 54; hdr[14] = 40;
+                memcpy(hdr + 18, &w, 4); memcpy(hdr + 22, &h, 4);
+                hdr[26] = 1; hdr[28] = 32;
+                memcpy(hdr + 38, &ppm, 2); memcpy(hdr + 42, &ppm, 2);
+                fwrite(hdr, 1, 54, fp);
+                for (uint32_t y = h; y-- > 0;) {
+                    const uint32_t *src = (const uint32_t *)client->target_data;
+                    fwrite(src + y * w, 4, w, fp);
+                }
+                fclose(fp);
+                fprintf(stderr, "dumped %s (%ux%u)\n", path, w, h);
+            }
+        }
         return 0;
     }
     if (gx + SUB_SIZE > client->buffer_width
