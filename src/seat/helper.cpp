@@ -183,42 +183,24 @@ static void runWhenTreelandConfigInitialized(TreelandConfig *config,
                                              std::function<void()> callback)
 {
     // The DConfig initialization can fail in minimal environments (protocol
-    // test fixtures without a full DConfig daemon), in which case neither
-    // the success nor any failure handler would fire and the queued callback
-    // would never run. Fall back to a bounded retry so output restore still
-    // happens with generated defaults.
-    if (config->isInitializeSucceeded() || DConfigManager::instance()->isInitializeFailed()) {
+    // test fixtures without a full DConfig daemon). The generated config
+    // class emits configInitializeFailed in that case, so listen for it and
+    // run the callback on failure too (with generated defaults) instead of
+    // never running.
+    auto runOnce = [callback]() mutable {
+        static bool done = false;
+        if (done)
+            return;
+        done = true;
         callback();
+    };
+    if (config->isInitializeSucceeded()) {
+        runOnce();
         return;
     }
 
-    auto *contextCopy = new QPointer<QObject>(context);
-    auto *timer = new QTimer(config);
-    timer->setInterval(500);
-    int retries = 0;
-    QObject::connect(timer, &QTimer::timeout, config, [config, contextCopy, timer, callback, retries]() mutable {
-        if (config->isInitializeSucceeded()
-            || config->isInitializeFailed()
-            || DConfigManager::instance()->isInitializeFailed()
-            || ++retries > 10) {
-            timer->stop();
-            timer->deleteLater();
-            if (contextCopy->isNull()) {
-                delete contextCopy;
-                return;
-            }
-            delete contextCopy;
-            callback();
-            return;
-        }
-    });
-    QObject::connect(config, &TreelandConfig::configInitializeSucceed, context, callback);
-    QObject::connect(config, &QObject::destroyed, config, [contextCopy, timer] {
-        timer->stop();
-        timer->deleteLater();
-        delete contextCopy;
-    });
-    timer->start();
+    QObject::connect(config, &TreelandConfig::configInitializeSucceed, context, runOnce);
+    QObject::connect(config, &TreelandConfig::configInitializeFailed, context, runOnce);
 }
 
 static bool hasSavedOutputState(OutputConfig *config)
