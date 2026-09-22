@@ -7,15 +7,20 @@
 #include "surface/surfacewrapper.h"
 #include "core/rootsurfacecontainer.h"
 #include "core/shellhandler.h"
+#include "output/output.h"
 
 #include <wbackend.h>
 #include <woutputrenderwindow.h>
 #include <wsurfaceitem.h>
+#include <wscopedvalue.h>
 #include <QPointer>
 #include <QTimer>
 
+#include <wlr_all.h>
+
 namespace {
 SurfaceWrapper *g_wrapper = nullptr;
+WOutput *g_output = nullptr;
 // Aggregated output render statistics: the zero-coupling invariant is
 // "capturing never adds work to the physical output frame loop".
 struct OutputStats {
@@ -29,7 +34,7 @@ quint64 g_renderEndsAtLastCheck = 0;
 
 void protocol_test_setup(Helper *helper)
 {
-    add_headless_output(helper->backend(), false);
+    g_output = add_headless_output(helper->backend(), false);
     QObject::connect(helper->shellHandler(),
                      &ShellHandler::surfaceWrapperAdded,
                      helper,
@@ -94,10 +99,19 @@ extern "C" void ext_capture_query_state(void *data)
         state->content_y = qRound(offset.y());
         state->titlebar_height = state->content_y;
     }
-    fprintf(stderr, "[query] wrapper=(%d,%d) bounds=%dx%d renderEnds=%d\n",
+    // The owning output's name, so the client can bind the right wl_output
+    // (multi-output environments — CI creates several headless outputs).
+    if (g_wrapper->ownsOutput() && g_wrapper->ownsOutput()->output()) {
+        auto *out = g_wrapper->ownsOutput()->output();
+        const QByteArray outName = out->name().toUtf8();
+        strncpy(state->output_name, outName.constData(), sizeof(state->output_name) - 1);
+        state->output_name[sizeof(state->output_name) - 1] = '\0';
+        state->output_enabled = out->handle()->enabled ? 1 : 0;
+    }
+    fprintf(stderr, "[query] wrapper=(%d,%d) bounds=%dx%d renderEnds=%d out=%s\n",
             state->wrapper_x, state->wrapper_y,
             state->wrapper_width, state->wrapper_height,
-            g_stats.renderEndCount);
+            g_stats.renderEndCount, state->output_name);
 }
 
 // Zero-coupling probe: how many natural compositor frames happened since the
@@ -136,4 +150,25 @@ extern "C" void ext_capture_wait_render(void *data)
             (unsigned long long)start,
             (unsigned long long)g_stats.renderEndCount,
             state->ok, timer.elapsed());
+}
+
+// Re-enable the fixture output when the compositor's initial-scan/restore
+// path left it disabled (timing-dependent, observed with the GLES2 renderer).
+// wlr-screencopy fails on disabled outputs.
+extern "C" void ext_capture_enable_output(void *data)
+{
+    auto *state = static_cast<ext_capture_wait_state *>(data);
+    state->ok = 0;
+    if (!g_output)
+        return;
+    if (!g_output->handle()->enabled) {
+        WOutputStateGuard newState;
+        wlr_output_state_set_enabled(newState.get(), true);
+        wlr_output_state_set_custom_mode(newState.get(), 1280, 720, 0);
+        if (!wlr_output_commit_state(g_output->handle(), newState.get())) {
+            fprintf(stderr, "failed to re-enable fixture output\n");
+            return;
+        }
+    }
+    state->ok = g_output->handle()->enabled ? 1 : 0;
 }

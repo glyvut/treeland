@@ -22,6 +22,8 @@ struct ext_capture_state {
     int content_x;
     int content_y;
     int titlebar_height;
+    int output_enabled;
+    char output_name[64];
 };
 
 struct ext_capture_move_request {
@@ -37,6 +39,8 @@ struct ext_capture_render_delta {
 struct ext_capture_wait_state {
     int ok;
 };
+
+void ext_capture_enable_output(void *data);
 
 #ifdef __cplusplus
 }

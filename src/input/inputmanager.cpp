@@ -105,8 +105,18 @@ void InputManager::onConfigInitializeSucceed()
     }
 
     auto *globalConfig = Helper::instance()->globalConfig();
-    Q_ASSERT(isTreelandConfigInitialized(globalConfig));
-    applyNumLockToKeyboards();
+    // The DConfig initialization is asynchronous (DBus round trip) and may
+    // not have finished when input devices from the backend arrive — e.g. on
+    // a fast GLES2 start or when the daemon answers late. Defer instead of
+    // asserting so backend init speed cannot break the compositor startup.
+    if (isTreelandConfigInitialized(globalConfig)) {
+        applyNumLockToKeyboards();
+    } else if (globalConfig) {
+        connect(globalConfig, &TreelandConfig::configInitializeSucceed, this,
+                &InputManager::applyNumLockToKeyboards, Qt::UniqueConnection);
+        connect(globalConfig, &TreelandConfig::configInitializeFailed, this,
+                &InputManager::applyNumLockToKeyboards, Qt::UniqueConnection);
+    }
 }
 
 void InputManager::onMouseSettingsCreated(MouseSettingsInterfaceV1 *interface)

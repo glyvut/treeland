@@ -1071,6 +1071,79 @@ static int verify_subtree_pixels(const struct capture_client *client,
     return 1;
 }
 
+/* Find and bind the wl_output whose wl_output.name matches 
+ * 
+ * the given name (wl_output version 4). Returns NULL when not found; the
+ * caller then falls back to the first advertised output. */
+static void output_name_event(void *data, struct wl_output *output, const char *name)
+{
+    (void)output;
+    strncpy((char *)data, name, 63);
+    ((char *)data)[63] = '\0';
+}
+
+static void output_done_event(void *data, struct wl_output *output)
+{
+    (void)data;
+    (void)output;
+}
+
+static void output_geometry_event(void *data, struct wl_output *output, int32_t x, int32_t y,
+                                  int32_t pw, int32_t ph, int32_t sub, const char *make,
+                                  const char *model, int32_t transform)
+{
+    (void)data; (void)output; (void)x; (void)y; (void)pw; (void)ph;
+    (void)sub; (void)make; (void)model; (void)transform;
+}
+
+static void output_mode_event(void *data, struct wl_output *output, uint32_t flags,
+                              int32_t width, int32_t height, int32_t refresh)
+{
+    (void)data; (void)output; (void)flags; (void)width; (void)height; (void)refresh;
+}
+
+static void output_scale_event(void *data, struct wl_output *output, int32_t factor)
+{
+    (void)data; (void)output; (void)factor;
+}
+
+static void output_description_event(void *data, struct wl_output *output, const char *desc)
+{
+    (void)data; (void)output; (void)desc;
+}
+
+static const struct wl_output_listener output_name_listener = {
+    .geometry = output_geometry_event,
+    .mode = output_mode_event,
+    .done = output_done_event,
+    .scale = output_scale_event,
+    .name = output_name_event,
+    .description = output_description_event,
+};
+
+static struct wl_output *bind_output_by_name(struct client_connection *conn,
+                                             const char *want)
+{
+    char bound[64] = { 0 };
+    for (uint32_t i = 0; i < conn->global_count; ++i) {
+        const struct client_global *g = &conn->globals[i];
+        if (strcmp(g->interface, wl_output_interface.name) != 0 || g->version < 4)
+            continue;
+        struct wl_output *out = wl_registry_bind(conn->registry, g->name,
+                                                 &wl_output_interface, 4);
+        if (!out)
+            continue;
+        bound[0] = '\0';
+        wl_output_add_listener(out, &output_name_listener, bound);
+        wl_display_roundtrip(conn->display);
+        if (strcmp(bound, want) == 0)
+            return out;
+        wl_output_destroy(out);
+        wl_display_roundtrip(conn->display);
+    }
+    return NULL;
+}
+
 static void cleanup(struct capture_client *client)
 {
     if (client->session)
@@ -1141,14 +1214,44 @@ int protocol_test_run(const char *socket_name)
 
     /* Bind the toplevel list AFTER the window is mapped: its bind handler
      * enumerates existing toplevels, so the handle arrives without races. */
+    /* Early state query: the owning output's name is needed to bind the
+     * correct wl_output before any screencopy. */
+    if (!invoke_on_server_thread(ext_capture_query_state, &state) || !state.wrapper_ready) {
+        fprintf(stderr, "wrapper never became ready\n");
+        goto done;
+    }
+    /* The owning output may still be disabled during the compositor's initial
+     * scan/restore (async) — wlr-screencopy fails on disabled outputs. Wait
+     * for the enable to land before recording. */
+    for (int i = 0; !state.output_enabled && i < 100; i++) {
+        wl_display_roundtrip(client.connection.display);
+        if (!invoke_on_server_thread(ext_capture_query_state, &state))
+            break;
+    }
+    if (!state.output_enabled) {
+        struct ext_capture_wait_state est = { 0 };
+        invoke_on_server_thread(ext_capture_enable_output, &est);
+        if (!invoke_on_server_thread(ext_capture_query_state, &state))
+            fprintf(stderr, "re-query after enable failed\n");
+    }
+    if (!state.output_enabled)
+        fprintf(stderr, "warning: owning output still disabled, screencopy will fail\n");
     client.toplevel_list = client_bind(&client.connection,
         ext_foreign_toplevel_list_v1_interface.name,
         &ext_foreign_toplevel_list_v1_interface, 1);
     client.capture_manager = client_bind(&client.connection,
         ext_foreign_toplevel_image_capture_source_manager_v1_interface.name,
         &ext_foreign_toplevel_image_capture_source_manager_v1_interface, 1);
-    client.wl_output = client_bind(&client.connection, "wl_output",
-                                   &wl_output_interface, 1);
+    /* The listener must be attached before any further roundtrip: the server
+     * answers the bind with the enumeration of existing toplevels, and those
+     * events would otherwise be dispatched (and dropped) unlistened. */
+    ext_foreign_toplevel_list_v1_add_listener(client.toplevel_list,
+        &toplevel_list_listener, &client);
+    client.wl_output = state.output_name[0]
+        ? bind_output_by_name(&client.connection, state.output_name) : NULL;
+    if (!client.wl_output)
+        client.wl_output = client_bind(&client.connection, "wl_output",
+                                       &wl_output_interface, 1);
     client.screencopy_manager = client_bind(&client.connection,
         zwlr_screencopy_manager_v1_interface.name,
         &zwlr_screencopy_manager_v1_interface, 1);
@@ -1157,9 +1260,11 @@ int protocol_test_run(const char *socket_name)
                 (void *)client.toplevel_list, (void *)client.capture_manager);
         goto done;
     }
-    ext_foreign_toplevel_list_v1_add_listener(client.toplevel_list,
-        &toplevel_list_listener, &client);
-    if (wl_display_roundtrip(client.connection.display) < 0 || !client.handle_seen) {
+    for (int i = 0; i < 50 && !client.handle_seen; i++) {
+        if (wl_display_roundtrip(client.connection.display) < 0)
+            break;
+    }
+    if (!client.handle_seen) {
         fprintf(stderr, "no foreign toplevel handle seen\n");
         goto done;
     }
