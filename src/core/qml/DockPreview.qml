@@ -18,8 +18,48 @@ Item {
     property bool enableAnimation: aniDuration > 0
     property alias spacing: listview.spacing
     property bool enableBlur: true
-    // set by States
-    property bool isHorizontal
+    // Whether the window list is laid out horizontally. Determined by the dock
+    // direction, except in list mode where windows are always stacked vertically.
+    readonly property bool isHorizontal: (root.direction === ForeignToplevelManagerInterfaceV2.PreviewDirection.bottom
+                                          || root.direction === ForeignToplevelManagerInterfaceV2.PreviewDirection.top)
+                                         && !root.listMode
+    // List mode: too many windows to fit as thumbnails, show a vertical list of
+    // window titles instead (no live preview).
+    property bool listMode: false
+    readonly property int listRowHeight: 36
+    readonly property int listWidth: Math.min(320, Math.max(160, root.screenWidth - 60))
+    // Duration of the preview <-> list content morph. Single knob so the pacing
+    // is easy to tune; the reference dock animation is a slow ease-out morph
+    // (about one second), not a quick collapse.
+    property int contentMorphDuration: 1000
+    // --- preview <-> list morph state ---
+    // The transition is one continuous morph: the panel takes the new content
+    // from the start (so its target size is known immediately and the border
+    // animates towards it), while the previous content is kept in a second
+    // layer that shrinks/fades out. A single progress value drives the fade.
+    property bool morphing: false
+    property real morphProgress: 0
+    property bool outgoingListMode: false
+    property real morphFromWidth: 0
+    property real morphFromHeight: 0
+    readonly property real incomingOpacity: root.morphing ? root.morphProgress : 1
+    readonly property real outgoingOpacity: root.morphing ? (1 - root.morphProgress) : 0
+    readonly property real outgoingHeightScale: root.morphFromHeight > 0 ? background.implicitHeight / root.morphFromHeight : 1
+    // An incoming list grows in sync with the panel height: the content is laid
+    // out at the target size, so scale it by the fraction of the target height
+    // the panel currently shows. (Only meaningful while morphing into list
+    // mode; the panel and this value reach 1 together at the end.)
+    readonly property real incomingHeightScale: {
+        if (!root.morphing || !root.listMode)
+            return 1;
+        const targetHeight = root.implicitHeight + 2 * listview.spacing - headLayout.implicitHeight;
+        if (targetHeight <= 0)
+            return 1;
+        return Math.min(1, (background.implicitHeight - headLayout.implicitHeight) / targetHeight);
+    }
+    readonly property bool outgoingHorizontal: (root.direction === ForeignToplevelManagerInterfaceV2.PreviewDirection.bottom
+                                                || root.direction === ForeignToplevelManagerInterfaceV2.PreviewDirection.top)
+                                               && !root.outgoingListMode
     // set by show()
     property var target
     property point pos
@@ -135,6 +175,35 @@ Item {
         }
     }
 
+    // Snapshot of the content that is leaving during a preview <-> list morph.
+    ListModel {
+        id: outgoingModel
+    }
+
+    // Begin a preview <-> list morph. The previous content is snapshotted into
+    // the outgoing layer, the new content is applied immediately (so the panel
+    // starts resizing from the very first frame), and one progress animation
+    // drives the whole cross-fade so nothing happens in disconnected steps.
+    function startContentMorph(surfaces, useList) {
+        const oldSurfaces = filterSurfaceModel.desiredSurfaces;
+        outgoingModel.clear();
+        for (let i = 0; i < oldSurfaces.length; ++i)
+            outgoingModel.append({ "wrapper": oldSurfaces[i] });
+
+        root.outgoingListMode = root.listMode;
+        root.morphFromWidth = background.implicitWidth;
+        root.morphFromHeight = background.implicitHeight;
+        root.morphProgress = 0;
+        root.morphing = true;
+
+        // Apply the incoming content right away so the panel has a target size
+        // to morph towards while the old content is still fading out.
+        root.listMode = useList;
+        filterSurfaceModel.desiredSurfaces = surfaces;
+
+        contentMorphAnimation.restart();
+    }
+
     function show(surfaces, target, pos, direction) {
         console.info(qLcDockPreview, "start show windows: ", surfaces)
         root.parent = target.parent;
@@ -145,11 +214,32 @@ Item {
             root.listviewPinToLeft = root.pos?.x - pos?.x <= 0;
         else
             root.listviewPinToLeft = true
-        filterSurfaceModel.desiredSurfaces = surfaces
+
+        const wasShowing = root.isShowing;
+        const wasTooltip = root.isTooltip;
+        const wasList = root.listMode;
+
+        // Update the target state first: shouldUseList() reads the output rect
+        // (outPutPos/outPutSize), which is derived from root.target.
         root.pos = pos;
         root.direction = direction;
         root.target = target;
-        if (root.isShowing && root.isTooltip) {
+
+        const useList = shouldUseList(surfaces, target, pos, direction);
+
+        const switchContentMode = wasShowing && !wasTooltip && wasList !== useList;
+
+        if (switchContentMode && root.enableAnimation) {
+            startContentMorph(surfaces, useList);
+        } else {
+            contentMorphAnimation.stop();
+            root.morphing = false;
+            outgoingModel.clear();
+            root.listMode = useList;
+            filterSurfaceModel.desiredSurfaces = surfaces;
+        }
+
+        if (wasShowing && wasTooltip) {
             if (root.enableAnimation) {
                 tooltip2PreViewAnimation.start();
             } else {
@@ -158,6 +248,52 @@ Item {
         }
         root.isTooltip = false;
         root.isShowing = true;
+    }
+
+    // Decide whether the thumbnails would not fit on screen and a vertical
+    // title list has to be used instead.
+    function shouldUseList(surfaces, target, pos, direction) {
+        if (!surfaces || surfaces.length === 0)
+            return false;
+
+        const horizontalDock = direction === ForeignToplevelManagerInterfaceV2.PreviewDirection.bottom
+                               || direction === ForeignToplevelManagerInterfaceV2.PreviewDirection.top;
+        const screenExtent = horizontalDock ? root.screenWidth : root.screenHeight;
+
+        // The panel stays centred on the dock icon, so its usable span is
+        // symmetric: it can only grow to twice the icon's distance to the
+        // nearest screen edge before it runs off screen (and the edge clamp
+        // would then push the whole panel away from the icon). Base the
+        // overflow decision on that span so thumbnail mode always stays centred
+        // on the icon instead of being shifted aside.
+        const center = horizontalDock ? (target?.x ?? 0) + (pos?.x ?? 0)
+                                      : (target?.y ?? 0) + (pos?.y ?? 0);
+        const nearEdge = horizontalDock ? outPutPos.x : outPutPos.y;
+        const farEdge = horizontalDock ? outPutPos.x + outPutSize.width
+                                       : outPutPos.y + outPutSize.height;
+        const span = 2 * Math.min(center - nearEdge, farEdge - center) - 40;
+        // Fall back to the raw screen size if the icon geometry is unusable.
+        const available = (center > nearEdge && center < farEdge && span > 0)
+                          ? span : screenExtent - 40;
+
+        let extent = listview.spacing * (surfaces.length + 1);
+        for (let i = 0; i < surfaces.length; ++i) {
+            const width = surfaces[i].width;
+            const height = surfaces[i].height;
+            if (!width || !height) {
+                extent += 120;
+                continue;
+            }
+            if (horizontalDock)
+                extent += Math.max(80, Math.min(240, 120 * width / height));
+            else
+                extent += Math.max(80, Math.min(120, 240 * height / width));
+        }
+        const result = extent > available;
+        console.info(qLcDockPreview, "dock preview extent", extent, "available", available,
+                     "center", center, "direction", direction, "windows", surfaces.length,
+                     "list mode", result);
+        return result;
     }
 
     function showTooltip(tooltip, target, pos, direction) {
@@ -239,7 +375,6 @@ Item {
                 target: root
                 anchors.horizontalCenterOffset: root.pos.x - root.target?.width / 2 + horizontalCenterOffsetAdjust
                 anchors.bottomMargin: -root.pos.y
-                isHorizontal: true
                 restoreEntryValues: false
             }
             PropertyChanges {
@@ -265,7 +400,6 @@ Item {
                 target: root
                 anchors.verticalCenterOffset: root.pos.y - root.target?.height / 2 + verticalCenterOffsetAdjust
                 anchors.leftMargin: root.pos.x
-                isHorizontal: false
                 restoreEntryValues: false
             }
             PropertyChanges {
@@ -291,7 +425,6 @@ Item {
                 target: root
                 anchors.horizontalCenterOffset: root.pos.x - root.target?.width / 2 + horizontalCenterOffsetAdjust
                 anchors.topMargin: root.pos.y
-                isHorizontal: true
                 restoreEntryValues: false
             }
             PropertyChanges {
@@ -317,7 +450,6 @@ Item {
                 target: root
                 anchors.verticalCenterOffset: root.pos.y - root.target?.height / 2 + verticalCenterOffsetAdjust
                 anchors.rightMargin: -root.pos.x
-                isHorizontal: false
                 restoreEntryValues: false
             }
             PropertyChanges {
@@ -420,11 +552,20 @@ Item {
         // Topmost z of the preview items (delegates).
         readonly property int delegateZBase: 10000
         clip: false
+        opacity: root.incomingOpacity
         anchors.left: parent.left // Maybe changed in `onListviewPinToLeftChanged`
         anchors.leftMargin: listview.spacing
         anchors.rightMargin: listview.spacing
         anchors.bottom: parent.bottom
         transformOrigin: root.listviewPinToLeft ? Item.BottomLeft : Item.BottomRight
+        // An incoming list grows together with the panel height instead of just
+        // fading in at full size. (Identity while not list-morphing.)
+        transform: Scale {
+            origin.x: 0
+            origin.y: listview.height
+            xScale: 1
+            yScale: root.incomingHeightScale
+        }
 
         orientation: root.isHorizontal ? ListView.Horizontal : ListView.Vertical
         layoutDirection: Qt.LeftToRight
@@ -481,8 +622,17 @@ Item {
             required property var wrapper // from filterSurfaceModel
             property bool isRemoving: false
 
-            implicitHeight: root.isHorizontal ? 120 : Math.max(80, Math.min(120, 240 * wrapper.height / wrapper.width))
-            implicitWidth: root.isHorizontal ? Math.max(80, Math.min(240, 120 * wrapper.width / wrapper.height)) : 240
+            // Incoming thumbnails start stacked together and spread out as the
+            // morph progresses (they are only affected by the panel width).
+            transform: Translate {
+                x: (root.morphing && !root.listMode && root.isHorizontal) ? -(1 - root.morphProgress) * index * implicitWidth : 0
+                y: (root.morphing && !root.listMode && !root.isHorizontal) ? -(1 - root.morphProgress) * index * implicitHeight : 0
+            }
+
+            implicitHeight: root.listMode ? root.listRowHeight
+                                           : (root.isHorizontal ? 120 : Math.max(80, Math.min(120, 240 * wrapper.height / wrapper.width)))
+            implicitWidth: root.listMode ? root.listWidth
+                                          : (root.isHorizontal ? Math.max(80, Math.min(240, 120 * wrapper.width / wrapper.height)) : 240)
 
             Connections {
                 target: wrapper
@@ -492,7 +642,7 @@ Item {
             }
 
             ListView.onRemove: {
-                if (filterSurfaceModel.count) {
+                if (filterSurfaceModel.count && !root.morphing) {
                     isRemoving = true
                     removeAnimation.start()
                 }
@@ -503,10 +653,14 @@ Item {
                 PropertyAction { target: delegate; property: "ListView.delayRemove"; value: true }
                 NumberAnimation {
                     target: delegate
-                    property: "x"
+                    property: root.isHorizontal ? "x" : "y"
                     to: {
                         var item = listview.itemAtIndex(listview.model.count - 1)
-                        return item?.x + item?.implicitWidth - delegate.implicitWidth
+                        if (!item)
+                            return root.isHorizontal ? delegate.x : delegate.y
+                        return root.isHorizontal
+                            ? item.x + item.implicitWidth - delegate.implicitWidth
+                            : item.y + item.implicitHeight - delegate.implicitHeight
                     }
                     duration: root.enableAnimation ? root.aniDuration : 0
                     easing.type: Easing.OutExpo
@@ -533,15 +687,40 @@ Item {
                 }
             }
 
-            ShaderEffectSource {
-                id: effect
-                anchors.centerIn: parent
-                implicitHeight: Math.min(parent.implicitHeight, wrapper.height * parent.implicitWidth / wrapper.width) - 4
-                implicitWidth: Math.min(parent.implicitWidth, wrapper.width * parent.implicitHeight / wrapper.height) - 4
-                live: true
-                hideSource: false
-                smooth: true
-                sourceItem: wrapper
+            Loader {
+                id: contentLoader
+                anchors.fill: parent
+                sourceComponent: root.listMode ? listRowComponent : thumbnailComponent
+            }
+
+            Component {
+                id: thumbnailComponent
+                ShaderEffectSource {
+                    anchors.centerIn: parent
+                    implicitHeight: Math.min(parent.height, wrapper.height * parent.width / wrapper.width) - 4
+                    implicitWidth: Math.min(parent.width, wrapper.width * parent.height / wrapper.height) - 4
+                    live: true
+                    hideSource: false
+                    smooth: true
+                    sourceItem: wrapper
+                }
+            }
+
+            Component {
+                id: listRowComponent
+                Item {
+                    anchors.fill: parent
+                    Text {
+                        anchors.fill: parent
+                        anchors.leftMargin: listview.spacing
+                        anchors.rightMargin: listview.spacing
+                        text: wrapper.shellSurface.title
+                        font.pointSize: 14
+                        elide: Text.ElideRight
+                        horizontalAlignment: Text.AlignLeft
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
             }
 
             // one close button per preview, shown while hovering this item
@@ -572,7 +751,7 @@ Item {
 
         add: Transition {
             id: addTransition
-            enabled: !root.isNewDockPreview
+            enabled: !root.isNewDockPreview && !root.morphing
 
             ParallelAnimation {
                 NumberAnimation {
@@ -583,10 +762,14 @@ Item {
                 }
 
                 NumberAnimation {
-                    property:"x"
+                    property: root.isHorizontal ? "x" : "y"
                     from: {
                         var item = listview.itemAtIndex(listview.model.lastSize - 1)
-                        return item?.x + item?.implicitWidth - addTransition.ViewTransition.item?.implicitWidth
+                        if (!item)
+                            return 0
+                        return root.isHorizontal
+                            ? item.x + item.implicitWidth - addTransition.ViewTransition.item?.implicitWidth
+                            : item.y + item.implicitHeight - addTransition.ViewTransition.item?.implicitHeight
                     }
                     duration: root.enableAnimation ? root.aniDuration : 0
                     easing.type: Easing.OutExpo
@@ -603,6 +786,90 @@ Item {
                 }
             }
             cursorShape: Qt.ArrowCursor
+        }
+    }
+
+    // Previous content, shown only while morphing. It keeps the outgoing mode
+    // (a list shrinks with the panel height, a thumbnail strip converges into a
+    // stack) and fades out while the main listview fades the new content in.
+    ListView {
+        id: outgoingView
+        parent: background
+        model: outgoingModel
+        visible: root.morphing
+        enabled: false
+        opacity: root.outgoingOpacity
+        z: listview.z + 1
+        clip: false
+        interactive: false
+        focus: false
+
+        anchors.left: parent.left
+        anchors.leftMargin: listview.spacing
+        anchors.rightMargin: listview.spacing
+        anchors.bottom: parent.bottom
+
+        orientation: root.outgoingHorizontal ? ListView.Horizontal : ListView.Vertical
+        layoutDirection: Qt.LeftToRight
+        verticalLayoutDirection: ListView.TopToBottom
+        boundsBehavior: Flickable.StopAtBounds
+        spacing: listview.spacing
+        transformOrigin: Item.BottomLeft
+        implicitHeight: root.morphing ? (root.morphFromHeight - headLayout.implicitHeight) : 0
+        implicitWidth: root.morphing ? (root.morphFromWidth - listview.spacing * 2) : 0
+
+        // A leaving list shrinks with the panel height; a leaving thumbnail strip
+        // keeps its size here and converges item-by-item in the delegate below.
+        transform: Scale {
+            origin.x: 0
+            origin.y: outgoingView.height
+            xScale: 1
+            yScale: root.outgoingListMode ? root.outgoingHeightScale : 1
+        }
+
+        delegate: Rectangle {
+            id: outgoingDelegate
+            radius: listview.radius
+            color: Qt.rgba(0, 0, 0, 0.05)
+
+            required property var index
+            required property var wrapper
+
+            // Leaving thumbnails converge back into a stack as the morph
+            // progresses, mirroring how the incoming thumbnails spread out
+            // (instead of the whole strip being squeezed horizontally).
+            transform: Translate {
+                x: (root.outgoingHorizontal && !root.outgoingListMode) ? -root.morphProgress * index * implicitWidth : 0
+                y: (!root.outgoingHorizontal && !root.outgoingListMode) ? -root.morphProgress * index * implicitHeight : 0
+            }
+
+            implicitHeight: root.outgoingListMode ? root.listRowHeight
+                                                  : (root.outgoingHorizontal ? 120 : Math.max(80, Math.min(120, 240 * wrapper.height / wrapper.width)))
+            implicitWidth: root.outgoingListMode ? root.listWidth
+                                                 : (root.outgoingHorizontal ? Math.max(80, Math.min(240, 120 * wrapper.width / wrapper.height)) : 240)
+
+            ShaderEffectSource {
+                anchors.centerIn: parent
+                visible: !root.outgoingListMode
+                implicitHeight: Math.min(parent.height, wrapper.height * parent.width / wrapper.width) - 4
+                implicitWidth: Math.min(parent.width, wrapper.width * parent.height / wrapper.height) - 4
+                live: true
+                hideSource: false
+                smooth: true
+                sourceItem: wrapper
+            }
+
+            Text {
+                anchors.fill: parent
+                visible: root.outgoingListMode
+                anchors.leftMargin: listview.spacing
+                anchors.rightMargin: listview.spacing
+                text: wrapper.shellSurface.title
+                font.pointSize: 14
+                elide: Text.ElideRight
+                horizontalAlignment: Text.AlignLeft
+                verticalAlignment: Text.AlignVCenter
+            }
         }
     }
 
@@ -637,6 +904,24 @@ Item {
             }
         }
         PropertyAction { target: root; property: "tooltip"; value: "" }
+    }
+
+    // Single driver for the preview <-> list morph. The panel size (through the
+    // background Behavior), the outgoing layer fade/scale and the incoming layer
+    // fade/spread are all timed off this, so the transition reads as one
+    // continuous motion instead of disconnected steps.
+    NumberAnimation {
+        id: contentMorphAnimation
+        target: root
+        property: "morphProgress"
+        from: 0
+        to: 1
+        duration: root.enableAnimation ? root.contentMorphDuration : 0
+        easing.type: Easing.OutCubic
+        onFinished: {
+            root.morphing = false;
+            outgoingModel.clear();
+        }
     }
 
     Rectangle {
@@ -827,16 +1112,16 @@ Item {
         Behavior on implicitHeight {
             enabled: background.visible && root.enableAnimation
             NumberAnimation {
-                duration: root.enableAnimation ? root.aniDuration : 0
-                easing.type: Easing.OutExpo
+                duration: root.enableAnimation ? (root.morphing ? root.contentMorphDuration : root.aniDuration) : 0
+                easing.type: root.morphing ? Easing.OutCubic : Easing.OutExpo
             }
         }
 
         Behavior on implicitWidth {
             enabled: background.visible && root.enableAnimation
             NumberAnimation {
-                duration: root.enableAnimation ? root.aniDuration : 0
-                easing.type: Easing.OutExpo
+                duration: root.enableAnimation ? (root.morphing ? root.contentMorphDuration : root.aniDuration) : 0
+                easing.type: root.morphing ? Easing.OutCubic : Easing.OutExpo
             }
         }
 
