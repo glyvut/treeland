@@ -15,7 +15,7 @@ Item {
     id: root
     property int aniDuration: 350
     property bool enableAnimation: aniDuration > 0
-    property alias spacing: listview.spacing
+    property int spacing: 5
 
     readonly property int panelHorizontalPadding: PopoverStyle.tooltipHorizontalPadding
     readonly property int panelVerticalPadding: PopoverStyle.tooltipVerticalPadding
@@ -58,14 +58,16 @@ Item {
     enum Mode { Tooltip, Preview }
     property int mode: DockPreview.Mode.Tooltip
     readonly property bool tooltipLayout: root.mode === DockPreview.Mode.Tooltip
-    property bool isNewDockPreview: false
-    property bool listviewPinToLeft: true
+    property bool stripPinToLeft: true
     // The authoritative list of windows the preview shows.
     property var desiredSurfaces: []
-    onDesiredSurfacesChanged: filterSurfaceModel.updateModel()
+    onDesiredSurfacesChanged: root.syncSlots(root.desiredSurfaces)
     // Visibility of the preview content, 0..1. It is the preview's own progress:
     // 1 while the preview is on screen, 0 while the tooltip replaces it.
     property real previewReveal: 0
+    // Progress of the preview content as the whole popover shows it: the reveal
+    // covers mode switches, the shell fade covers entering and leaving.
+    readonly property real contentFade: root.previewReveal * root.shellFade
 
     // Height of the title row. It is the space the preview layer has to leave
     // free at the top of the frame.
@@ -85,8 +87,15 @@ Item {
         return Qt.size(240, Math.max(80, Math.min(120, 240 * wrapper.height / wrapper.width)));
     }
 
-    // Natural size of a preview layout for a given set of surfaces. Pure, so a
-    // switch can know the final frame size before any layer or delegate exists.
+    // Fitted size of a thumbnail inside a slot, aspect ratio preserved. Shared
+    // by the slot itself and by the layers that outlive it.
+    function thumbnailSize(wrapper, slotWidth, slotHeight) {
+        if (!wrapper || !(wrapper.width > 0) || !(wrapper.height > 0))
+            return Qt.size(0, 0);
+        return Qt.size(Math.min(slotWidth, wrapper.width * slotHeight / wrapper.height) - 4,
+                       Math.min(slotHeight, wrapper.height * slotWidth / wrapper.width) - 4);
+    }
+
     function contentSizeFor(wrappers, horizontal) {
         const count = wrappers ? wrappers.length : 0;
         let width = 0;
@@ -198,6 +207,7 @@ Item {
                         root.tooltipSurface = null;
                         root.mode = DockPreview.Mode.Tooltip;
                         root.desiredSurfaces = [ ];
+                        root.destroySlots();
                     }
                 }
             }
@@ -297,98 +307,466 @@ Item {
         }
     }
 
-    /* --- model begin --- */
-    ListModel {
-        id: filterSurfaceModel
-        property int lastSize: 0
-        onCountChanged: {
-            Qt.callLater(()=> { lastSize = count })
-        }
+    // Content a slot has stopped showing: the frame and the thumbnail it was
+    // drawing, fading from wherever it is and destroying itself. Every layer owns
+    // its own fade, so a switch that interrupts another one keeps the content
+    // that is still leaving instead of dropping it.
+    Component {
+        id: retiredContentComponent
 
-        // View mirror of root.desiredSurfaces. Called by its change handler; it
-        // only keeps the row count and row contents in step with the authority.
-        function updateModel() {
-            const surfaces = root.desiredSurfaces;
-            const newSize = surfaces.length;
-            const oldSize = filterSurfaceModel.count;
-            root.isNewDockPreview = oldSize === 0 && newSize !== 0;
-            for (let i = 0; i < Math.min(newSize, oldSize); i++) {
-                filterSurfaceModel.set(i, {"wrapper": surfaces[i]})
+        Item {
+            id: retired
+            property var wrapper: null
+
+            readonly property size fittedSize:
+                root.thumbnailSize(wrapper, width, height)
+
+            Rectangle {
+                anchors.fill: parent
+                radius: slotView.radius
+                color: PopoverStyle.itemBackground
             }
-            if (newSize > oldSize) {
-                for (let index = oldSize; index < newSize; index++) {
-                    filterSurfaceModel.append({"wrapper": surfaces[index]});
-                }
+
+            ShaderEffectSource {
+                anchors.centerIn: parent
+                implicitHeight: retired.fittedSize.height
+                implicitWidth: retired.fittedSize.width
+                sourceItem: retired.wrapper
             }
-            if (newSize < oldSize) {
-                filterSurfaceModel.remove(newSize, oldSize - newSize)
+
+            NumberAnimation {
+                id: fadeAnimation
+                target: retired
+                property: "opacity"
+                to: 0
+                duration: root.aniDuration
+                // The cross fade runs on a symmetric curve; Qt wants the two
+                // control points and the end of the segment.
+                easing.type: Easing.Bezier
+                easing.bezierCurve: [0.42, 0, 0.58, 1, 1, 1]
+                onFinished: retired.destroy()
             }
-        }
 
-        function removeSurface(surfaceWrapper) {
-            if (!surfaceWrapper)
-                return;
-
-            const index = root.desiredSurfaces.indexOf(surfaceWrapper);
-            if (index < 0)
-                return;
-
-            // Copy instead of splice: the assignment is what triggers updateModel.
-            const surfaces = root.desiredSurfaces.slice();
-            surfaces.splice(index, 1);
-            root.desiredSurfaces = surfaces;
-        }
-
-        function activateWindow(surfaceWrapper) {
-            console.debug(qLcDockPreview, "activate preview window: ", surfaceWrapper)
-            WaylandServer.forceActivateSurface(surfaceWrapper)
-            ForeignToplevelManagerInterfaceV3.leaveDockPreview(root.target.shellSurface.surface)
-            root.close();
-        }
-
-        function previewWindow(surfaceWrapper) {
-            console.debug(qLcDockPreview, "start preview window: ", surfaceWrapper)
-            WaylandServer.workspace.startPreviewing(surfaceWrapper);
-        }
-
-        function stopPreviewWindow() {
-            console.debug(qLcDockPreview, "stop preview window")
-            WaylandServer.workspace.stopPreviewing();
-        }
-
-        function closeAllWindow() {
-            console.debug(qLcDockPreview, "close all preview windows")
-            const surfaces = root.desiredSurfaces;
-            root.desiredSurfaces = [ ];
-            for (let surface of surfaces) {
-                if (surface && surface.shellSurface)
-                    surface.shellSurface.close();
+            // `from` continues an interrupted cross fade from where the content
+            // it copies was drawn, instead of snapping it back to full.
+            function fadeOut(from) {
+                opacity = from === undefined ? 1 : from;
+                fadeAnimation.start();
             }
-            root.close();
-        }
-
-        function closeSpecialWindow(surfaceWrapper) {
-            if (!surfaceWrapper)
-                return;
-
-            console.debug(qLcDockPreview, "close a special window: ", surfaceWrapper)
-            filterSurfaceModel.removeSurface(surfaceWrapper)
-            if (surfaceWrapper.shellSurface)
-                surfaceWrapper.shellSurface.close()
         }
     }
 
+    // A slot: the window it shows, the rect it is drawn from and the rect it is
+    // heading to, and its own animations between them. A slot outlives the list
+    // it came from - one that is dropped keeps moving out and destroys itself
+    // once it is done, so a switch may reverse at any point.
+    Component {
+        id: slotComponent
+
+        Item {
+            id: slot
+
+            property var wrapper: null
+            property rect fromRect: Qt.rect(0, 0, 0, 0)
+            property rect toRect: Qt.rect(0, 0, 0, 0)
+            property real progress: 1
+            // The frame and the content fade on their own values: an added slot
+            // brings both in, a swap only replaces the content.
+            property real borderOpacity: 1
+            property real contentOpacity: 1
+            property bool leaving: false
+            // Position of the slot in the strip, kept by the layout.
+            property int slotIndex: -1
+
+            x: fromRect.x + (toRect.x - fromRect.x) * progress
+            y: fromRect.y + (toRect.y - fromRect.y) * progress
+            width: fromRect.width + (toRect.width - fromRect.width) * progress
+            height: fromRect.height + (toRect.height - fromRect.height) * progress
+
+            readonly property size fittedSize: root.thumbnailSize(wrapper, width, height)
+
+            // Out from behind the edge the strip ended at, to its own place.
+            function enter(newWrapper, edge, rect) {
+                wrapper = newWrapper;
+                if (!root.enableAnimation) {
+                    fromRect = rect;
+                    toRect = rect;
+                    progress = 1;
+                    return;
+                }
+                fromRect = root.isHorizontal
+                        ? Qt.rect(edge - rect.width, rect.y, rect.width, rect.height)
+                        : Qt.rect(rect.x, edge - rect.height, rect.width, rect.height);
+                toRect = rect;
+                progress = 0;
+                borderOpacity = 0;
+                contentOpacity = 0;
+                moveAnimation.restart();
+                borderReveal.restart();
+                contentReveal.restart();
+            }
+
+            // The slot keeps its place: a new window replaces the content in it,
+            // and it moves to the rect the layout gives it.
+            function retarget(newWrapper, rect) {
+                if (newWrapper !== wrapper) {
+                    if (root.enableAnimation && wrapper)
+                        retireContent(contentOpacity);
+                    wrapper = newWrapper;
+                    if (root.enableAnimation) {
+                        contentOpacity = 0;
+                        contentReveal.restart();
+                    } else {
+                        contentOpacity = 1;
+                    }
+                }
+                if (!root.enableAnimation) {
+                    fromRect = rect;
+                    toRect = rect;
+                    progress = 1;
+                    return;
+                }
+                // Carry on from where the slot is drawn right now, so a switch
+                // that interrupts another one does not jump.
+                fromRect = Qt.rect(x, y, width, height);
+                toRect = rect;
+                progress = 0;
+                moveAnimation.restart();
+            }
+
+            // The list no longer has this slot: it closes up towards the slot it
+            // followed and is destroyed when the animation is over.
+            function leave(collapseRect) {
+                leaving = true;
+                // Closing up while the slots that stay move over it.
+                z = 0;
+                if (!root.enableAnimation) {
+                    root.dropSlot(slot);
+                    return;
+                }
+                fromRect = Qt.rect(x, y, width, height);
+                toRect = collapseRect;
+                progress = 0;
+                moveAnimation.restart();
+                leaveFade.restart();
+            }
+
+            // The list wants this slot again before it finished leaving: it stops
+            // fading out and heads for the rect the layout gives it.
+            function revive(rect) {
+                leaving = false;
+                leaveFade.stop();
+                opacity = 1;
+                if (!root.enableAnimation) {
+                    fromRect = rect;
+                    toRect = rect;
+                    progress = 1;
+                    return;
+                }
+                fromRect = Qt.rect(x, y, width, height);
+                toRect = rect;
+                progress = 0;
+                moveAnimation.restart();
+                if (borderOpacity < 1)
+                    borderReveal.restart();
+                if (contentOpacity < 1)
+                    contentReveal.restart();
+            }
+
+            // One layer per content this slot is still fading out: an animation
+            // that interrupts another one adds its layer instead of taking the
+            // previous one over.
+            function retireContent(from) {
+                if (!wrapper)
+                    return;
+                const layer = retiredContentComponent.createObject(retiringHost,
+                                                                 {"wrapper": wrapper});
+                if (!layer) {
+                    console.warn(qLcDockPreview, "failed to create the leaving layer");
+                    return;
+                }
+                layer.width = Qt.binding(() => retiringHost.width);
+                layer.height = Qt.binding(() => retiringHost.height);
+                layer.fadeOut(from);
+            }
+
+            NumberAnimation {
+                id: moveAnimation
+                target: slot
+                property: "progress"
+                to: 1
+                duration: root.aniDuration
+                easing.type: Easing.OutExpo
+            }
+
+            NumberAnimation {
+                id: borderReveal
+                target: slot
+                property: "borderOpacity"
+                to: 1
+                duration: root.aniDuration
+                easing.type: Easing.OutExpo
+            }
+
+            NumberAnimation {
+                id: contentReveal
+                target: slot
+                property: "contentOpacity"
+                to: 1
+                duration: root.aniDuration
+                easing.type: Easing.Bezier
+                easing.bezierCurve: [0.42, 0, 0.58, 1, 1, 1]
+            }
+
+            NumberAnimation {
+                id: leaveFade
+                target: slot
+                property: "opacity"
+                to: 0
+                duration: root.aniDuration
+                easing.type: Easing.OutExpo
+                onFinished: root.dropSlot(slot)
+            }
+
+            Connections {
+                target: slot.wrapper
+                function onAboutToBeInvalidated() {
+                    root.removeSurface(slot.wrapper)
+                }
+            }
+
+            HoverHandler {
+                id: hoverHandler
+                onHoveredChanged: {
+                    if (hovered) {
+                        root.previewWindow(slot.wrapper)
+                        slotView.hoveredSlot = slot.slotIndex
+                    }
+                }
+                cursorShape: Qt.ArrowCursor
+            }
+
+            TapHandler {
+                onTapped: root.activateWindow(slot.wrapper)
+            }
+
+            // The frame the preview draws behind the thumbnail.
+            Rectangle {
+                anchors.fill: parent
+                radius: slotView.radius
+                color: PopoverStyle.itemBackground
+                opacity: slot.borderOpacity
+            }
+
+            ShaderEffectSource {
+                anchors.centerIn: parent
+                implicitHeight: slot.fittedSize.height
+                implicitWidth: slot.fittedSize.width
+                opacity: slot.contentOpacity
+                sourceItem: slot.wrapper
+            }
+
+            // Contents this slot is fading out, bounded by the slot itself.
+            Item {
+                id: retiringHost
+                anchors.fill: parent
+            }
+
+            // one close button per preview, shown while hovering this item
+            PopoverCloseButton {
+                id: closeButton
+                anchors {
+                    top: parent.top
+                    right: parent.right
+                    topMargin: 10
+                    rightMargin: 10
+                }
+                visible: hoverHandler.hovered && !slot.leaving
+                onClicked: {
+                    slotView.hoveredSlot = -1
+                    // capture the wrapper now: the deferred callback must not
+                    // read the slot again, it may be gone by then
+                    const target = slot.wrapper
+                    Qt.callLater(()=>root.closeSpecialWindow(target))
+                }
+            }
+        }
+    }
+
+    /* --- model begin --- */
+    // Slots the preview shows, in layout order, and the ones that are still
+    // fading out after the list dropped them.
+    property var liveSlots: []
+    property var leavingSlots: []
+
+    // Slot rects for a list of windows: pure, from the slot sizes alone.
+    function slotRects(wrappers) {
+        const rects = [ ];
+        let offset = 0;
+        for (let i = 0; i < wrappers.length; ++i) {
+            const size = root.previewSlotSize(wrappers[i], root.isHorizontal);
+            rects.push(root.isHorizontal
+                       ? Qt.rect(offset, 0, size.width, size.height)
+                       : Qt.rect(0, offset, size.width, size.height));
+            offset += root.spacing + (root.isHorizontal ? size.width : size.height);
+        }
+        return rects;
+    }
+
+    function slotTrailingEdge(rect) {
+        if (!rect)
+            return 0;
+        return root.isHorizontal ? rect.x + rect.width : rect.y + rect.height;
+    }
+
+    // Bring the slots in line with the windows the preview shows. Every slot keeps
+    // its own animation: a switch only updates where it comes from and where it
+    // goes, and a slot the list dropped keeps animating out on its own.
+    function syncSlots(wrappers) {
+        const rects = root.slotRects(wrappers);
+        const live = root.liveSlots;
+        const last = live.length ? live[live.length - 1] : null;
+        // New slots come out from behind the last slot that is on screen.
+        const entry = last ? root.slotTrailingEdge(Qt.rect(last.x, last.y, last.width,
+                                                           last.height)) : 0;
+
+        for (let i = 0; i < wrappers.length && i < live.length; ++i)
+            live[i].retarget(wrappers[i], rects[i]);
+
+        for (let i = live.length; i < wrappers.length; ++i) {
+            // A slot that was leaving the same window comes back instead of a new
+            // one being created next to it.
+            const revived = root.takeLeaving(wrappers[i]);
+            if (revived) {
+                live.push(revived);
+                revived.revive(rects[i]);
+                continue;
+            }
+            const slot = slotComponent.createObject(slotHost);
+            if (!slot) {
+                console.warn(qLcDockPreview, "failed to create a preview slot");
+                break;
+            }
+            live.push(slot);
+            slot.enter(wrappers[i], entry, rects[i]);
+        }
+
+        if (live.length > wrappers.length) {
+            const lastKept = wrappers.length ? root.slotTrailingEdge(rects[wrappers.length - 1])
+                                             : 0;
+            const dropped = live.splice(wrappers.length);
+            for (const slot of dropped) {
+                const rect = slot.toRect;
+                root.leavingSlots.push(slot);
+                slot.leave(root.isHorizontal
+                           ? Qt.rect(lastKept - rect.width, rect.y, rect.width, rect.height)
+                           : Qt.rect(rect.x, lastKept - rect.height, rect.width, rect.height));
+            }
+        }
+
+        for (let i = 0; i < live.length; ++i) {
+            live[i].slotIndex = i;
+            live[i].z = slotView.slotZBase - i;
+        }
+        if (slotView.hoveredSlot >= live.length)
+            slotView.hoveredSlot = -1;
+    }
+
+    // A slot that the same window is coming back to, if it is still leaving.
+    function takeLeaving(wrapper) {
+        const leaving = root.leavingSlots;
+        for (let i = 0; i < leaving.length; ++i) {
+            const slot = leaving[i];
+            if (slot.wrapper === wrapper) {
+                leaving.splice(i, 1);
+                return slot;
+            }
+        }
+        return null;
+    }
+
+    // A slot that is done takes itself out of both lists.
+    function dropSlot(slot) {
+        const live = root.liveSlots.indexOf(slot);
+        if (live >= 0)
+            root.liveSlots.splice(live, 1);
+        const leaving = root.leavingSlots.indexOf(slot);
+        if (leaving >= 0)
+            root.leavingSlots.splice(leaving, 1);
+        slot.destroy();
+    }
+
+    function destroySlots() {
+        const slots = root.liveSlots.concat(root.leavingSlots);
+        root.liveSlots = [ ];
+        root.leavingSlots = [ ];
+        for (const slot of slots)
+            slot.destroy();
+    }
+
+    function removeSurface(surfaceWrapper) {
+        if (!surfaceWrapper)
+            return;
+
+        const index = root.desiredSurfaces.indexOf(surfaceWrapper);
+        if (index < 0)
+            return;
+
+        // Copy instead of splice: the assignment is what syncs the slots.
+        const surfaces = root.desiredSurfaces.slice();
+        surfaces.splice(index, 1);
+        root.desiredSurfaces = surfaces;
+    }
+
+    function activateWindow(surfaceWrapper) {
+        console.debug(qLcDockPreview, "activate preview window: ", surfaceWrapper)
+        WaylandServer.forceActivateSurface(surfaceWrapper)
+        ForeignToplevelManagerInterfaceV3.leaveDockPreview(root.target.shellSurface.surface)
+        root.close();
+    }
+
+    function previewWindow(surfaceWrapper) {
+        console.debug(qLcDockPreview, "start preview window: ", surfaceWrapper)
+        WaylandServer.workspace.startPreviewing(surfaceWrapper);
+    }
+
+    function stopPreviewWindow() {
+        console.debug(qLcDockPreview, "stop preview window")
+        WaylandServer.workspace.stopPreviewing();
+    }
+
+    function closeAllWindow() {
+        console.debug(qLcDockPreview, "close all preview windows")
+        const surfaces = root.desiredSurfaces;
+        root.desiredSurfaces = [ ];
+        for (let surface of surfaces) {
+            if (surface && surface.shellSurface)
+                surface.shellSurface.close();
+        }
+        root.close();
+    }
+
+    function closeSpecialWindow(surfaceWrapper) {
+        if (!surfaceWrapper)
+            return;
+
+        console.debug(qLcDockPreview, "close a special window: ", surfaceWrapper)
+        root.removeSurface(surfaceWrapper)
+        if (surfaceWrapper.shellSurface)
+            surfaceWrapper.shellSurface.close()
+    }
     function show(surfaces, target, pos, direction) {
         console.info(qLcDockPreview, "start show windows: ", surfaces)
         const wasVisible = root.visible;
         root.parent = target.parent;
 
-        // We want keep listview ancher to left as possible, many animations rely on it
-        // Only when show `dock preview` <-> 'tooltip' animation ancher to right
+        // Keep the strip anchored to the dock side as much as possible, the
+        // switch animations rely on it. Only a `dock preview` <-> `tooltip`
+        // switch may anchor it to the other side.
         if (root.isShowing && root.tooltipLayout)
-            root.listviewPinToLeft = root.pos?.x - pos?.x <= 0;
+            root.stripPinToLeft = root.pos?.x - pos?.x <= 0;
         else
-            root.listviewPinToLeft = true
+            root.stripPinToLeft = true
 
         root.pos = pos;
         root.direction = direction;
@@ -401,8 +779,12 @@ Item {
                 windows.push(surfaces[i]);
         }
         root.desiredSurfaces = windows;
-        listview.contentX = 0;
-        listview.contentY = 0;
+        // Same anchor the list had: left/bottom by default, the opposite side for
+        // a horizontal strip that switched towards the dock.
+        slotView.contentX = root.isHorizontal && !root.stripPinToLeft
+                ? Math.max(0, root.contentSize.width - root.previewViewport.width) : 0;
+        slotView.contentY = root.isHorizontal
+                ? 0 : Math.max(0, root.contentSize.height - root.previewViewport.height);
         // A popover that is already on screen switches with a curve; one that is
         // entering from nothing lands on the final layout right away.
         root.setPreviewReveal(1, wasVisible);
@@ -460,9 +842,9 @@ Item {
         const wasVisible = root.visible;
         root.parent = target.parent;
         if (root.isShowing && !root.tooltipLayout)
-            root.listviewPinToLeft = root.pos?.x - pos?.x >= 0;
+            root.stripPinToLeft = root.pos?.x - pos?.x >= 0;
         else
-            root.listviewPinToLeft = true
+            root.stripPinToLeft = true
 
         root.pos = pos;
         root.direction = direction;
@@ -673,62 +1055,79 @@ Item {
         id: titleFontMetrics
         font: PopoverStyle.titleFont
     }
-
-    ListView {
-        id: listview
-        model: filterSurfaceModel
+    // The preview strip: a clipped, flickable viewport holding one item per slot.
+    // Each slot owns the animation between the rect it had and the rect the
+    // layout gives it now, so nothing else has to position them.
+    Flickable {
+        id: slotView
         // Outside the shell group: the preview content owns its own opacity, so
         // it does not multiply into the shell fade.
         parent: contentHost
 
-        property size lastSize: Qt.size(0, 0)
         property int radius: 5
-        // Topmost z of the preview items (delegates).
-        readonly property int delegateZBase: 10000
+        // Topmost z of the preview items.
+        readonly property int slotZBase: 10000
+        // Row of the slot the pointer is on, -1 when it is on none of them.
+        property int hoveredSlot: -1
+
         clip: true
         enabled: !root.tooltipLayout
+        // The view is held at the size the preview settles at, anchored to the
+        // dock side. Entering the popover and swapping it between tooltip and
+        // preview scale the whole view into the frame it is growing into.
         width: root.previewViewport.width
         height: root.previewViewport.height
-        x: root.listviewPinToLeft ? root.contentLeft
-                                  : root.contentLeft + root.contentWidth - width
+        x: root.stripPinToLeft ? root.contentLeft
+                               : root.contentLeft + root.contentWidth - width
         y: root.contentTop + root.contentHeight - height
-        transformOrigin: root.listviewPinToLeft ? Item.BottomLeft : Item.BottomRight
+        transformOrigin: root.stripPinToLeft ? Item.BottomLeft : Item.BottomRight
+        contentWidth: root.contentSize.width
+        contentHeight: root.contentSize.height
+        boundsBehavior: Flickable.StopAtBounds
+        interactive: true
         scale: {
             if (!(width > 0) || !(height > 0))
                 return 0;
-            return Math.max(0, Math.min(1, root.contentWidth / width,
-                                         root.contentHeight / height));
+            // Tooltip <-> preview and the entry scale the view into the frame it
+            // grows into. Between two previews the view keeps scale 1: the slots
+            // move and resize themselves, so their size never comes from a scale.
+            if (root.contentFade < 1)
+                return Math.max(0, Math.min(1, root.contentWidth / width,
+                                             root.contentHeight / height));
+            return 1;
         }
         // The reveal covers mode switches; the shell fade covers entering and
         // leaving the popover.
-        opacity: root.previewReveal * root.shellFade
+        opacity: root.contentFade
 
-        orientation: root.isHorizontal ? ListView.Horizontal : ListView.Vertical
-        layoutDirection: Qt.LeftToRight
-        verticalLayoutDirection: ListView.TopToBottom
-        boundsBehavior: Flickable.StopAtBounds
-        interactive: true
-        highlightFollowsCurrentItem: true
-        highlightMoveDuration: root.aniDuration/2
-        spacing: 5
-        highlight: Control {
+        // Hosts the slots. They are created, moved and destroyed by the layout,
+        // so a slot the list dropped can finish its own animation first.
+        Item {
+            id: slotHost
+            width: slotView.contentWidth
+            height: slotView.contentHeight
+        }
+
+        // Hover border, over every slot. Purely visual: it is kept out of hover
+        // competition so that the slot underneath still gets its own hover.
+        Control {
             objectName: "highlight"
             id: hoverBorder
-            visible: false
-            // purely visual overlay: keep it out of hover competition so that
-            // the preview item underneath still gets its own hover
+            readonly property Item slot:
+                slotView.hoveredSlot >= 0 && slotView.hoveredSlot < root.liveSlots.length
+                    ? root.liveSlots[slotView.hoveredSlot] : null
+            visible: slot !== null
             hoverEnabled: false
-            // keep the hover border above every preview
-            z: listview.delegateZBase + 1
-            anchors {
-                verticalCenter: listview.orientation === ListView.Horizontal && parent ? parent.verticalCenter : undefined
-                horizontalCenter: listview.orientation === ListView.Vertical && parent ? parent.horizontalCenter : undefined
-            }
+            z: slotView.slotZBase + 1
+            x: slot ? slot.x : 0
+            y: slot ? slot.y : 0
+            width: slot ? slot.width : 0
+            height: slot ? slot.height : 0
 
             contentItem: Rectangle {
                 anchors.fill: parent
                 color: "transparent";
-                radius: listview.radius + border.width
+                radius: slotView.radius + border.width
                 property D.Palette borderPalette: D.Palette {
                     normal {
                         common: Qt.rgba(0, 0, 0, 0.2)
@@ -742,147 +1141,12 @@ Item {
                 border.width: 4
             }
         }
-        focus: true
-        delegate: Rectangle {
-            id: delegate
-            objectName: "delegate"
-            // ensure removing items are below non-removing ones
-            z: (isRemoving ? -index : (listview.delegateZBase - index))
-            visible: true
-            radius: listview.radius
-            color: PopoverStyle.itemBackground
-
-            required property var index
-            required property var wrapper // from filterSurfaceModel
-            property bool isRemoving: false
-            readonly property size naturalSize: root.previewSlotSize(wrapper, root.isHorizontal)
-
-            implicitWidth: naturalSize.width
-            implicitHeight: naturalSize.height
-
-            Connections {
-                target: wrapper
-                function onAboutToBeInvalidated() {
-                    listview.model.removeSurface(wrapper)
-                }
-            }
-
-            ListView.onRemove: {
-                if (filterSurfaceModel.count) {
-                    isRemoving = true
-                    removeAnimation.start()
-                }
-            }
-
-            SequentialAnimation {
-                id: removeAnimation
-                PropertyAction { target: delegate; property: "ListView.delayRemove"; value: true }
-                NumberAnimation {
-                    target: delegate
-                    property: "x"
-                    to: {
-                        // The last slot is not instantiated once it is outside the
-                        // viewport, and `undefined + undefined` is NaN: keep the
-                        // item where it is instead of animating to nowhere.
-                        const item = listview.itemAtIndex(listview.model.count - 1)
-                        if (!item)
-                            return delegate.x;
-                        return item.x + item.implicitWidth - delegate.implicitWidth
-                    }
-                    duration: root.aniDuration
-                    easing.type: Easing.OutExpo
-                }
-                PropertyAction { target: delegate; property: "ListView.delayRemove"; value: false }
-            }
-
-            HoverHandler {
-                id: hoverHandler
-                onHoveredChanged: {
-                    if (hovered) {
-                        listview.model.previewWindow(wrapper)
-                        listview.currentIndex = index
-                        if (listview.highlightItem)
-                            listview.highlightItem.visible = true
-                    }
-                }
-                cursorShape: Qt.ArrowCursor
-            }
-
-            TapHandler {
-                onTapped: {
-                    listview.model.activateWindow(wrapper)
-                }
-            }
-
-            ShaderEffectSource {
-                id: effect
-                anchors.centerIn: parent
-                implicitHeight: Math.min(parent.implicitHeight, wrapper.height * parent.implicitWidth / wrapper.width) - 4
-                implicitWidth: Math.min(parent.implicitWidth, wrapper.width * parent.implicitHeight / wrapper.height) - 4
-                live: true
-                hideSource: false
-                smooth: true
-                sourceItem: wrapper
-            }
-
-            // one close button per preview, shown while hovering this item
-            PopoverCloseButton {
-                id: closeButton
-                anchors {
-                    top: parent.top
-                    right: parent.right
-                    topMargin: 10
-                    rightMargin: 10
-                }
-                visible: hoverHandler.hovered && !isRemoving
-                onClicked: {
-                    listview.highlightItem.visible = false
-                    // capture the wrapper now: the deferred callback must not
-                    // read the delegate's row again, the rows may have been
-                    // removed or refreshed by then
-                    const target = wrapper
-                    Qt.callLater(()=>listview.model.closeSpecialWindow(target))
-                }
-            }
-        }
-
-        add: Transition {
-            id: addTransition
-            enabled: !root.isNewDockPreview
-
-            ParallelAnimation {
-                NumberAnimation {
-                    property: "opacity"
-                    from: 0.3
-                    to: 1
-                    duration: root.aniDuration
-                    easing.type: Easing.OutExpo
-                }
-
-                NumberAnimation {
-                    property: "x"
-                    from: {
-                        // The slot the new one slides out from may be outside the
-                        // viewport, hence not instantiated: start from the item's
-                        // own place instead of animating from NaN.
-                        const item = listview.itemAtIndex(listview.model.lastSize - 1)
-                        const added = addTransition.ViewTransition.item
-                        if (!item)
-                            return added ? added.x : 0;
-                        return item.x + item.implicitWidth - (added ? added.implicitWidth : 0)
-                    }
-                    duration: root.aniDuration
-                    easing.type: Easing.OutExpo
-                }
-            }
-        }
 
         HoverHandler {
             onHoveredChanged: {
                 if (!hovered) {
-                    if (listview.highlightItem)
-                        listview.highlightItem.visible = false
-                    listview.model.stopPreviewWindow()
+                    slotView.hoveredSlot = -1
+                    root.stopPreviewWindow()
                 }
             }
             cursorShape: Qt.ArrowCursor
@@ -947,7 +1211,7 @@ Item {
 
         HoverHandler {
             id: titleHover
-            enabled: listview.count !== 0
+            enabled: root.desiredSurfaces.length !== 0
             onHoveredChanged: {
                 if (!hovered) {
                     ForeignToplevelManagerInterfaceV3.leaveDockPreview(root.target.shellSurface.surface)
@@ -988,7 +1252,7 @@ Item {
                         const surfaces = root.desiredSurfaces;
                         if (surfaces.length === 0)
                             return "";
-                        const index = Math.min(Math.max(listview.currentIndex, 0),
+                        const index = Math.min(Math.max(slotView.hoveredSlot, 0),
                                                surfaces.length - 1);
                         const wrapper = surfaces[index];
                         return wrapper && wrapper.shellSurface
@@ -1010,7 +1274,7 @@ Item {
                 visible: !root.tooltipLayout && titleHover.hovered
                 Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
                 onClicked: {
-                    listview.model.closeAllWindow()
+                    root.closeAllWindow()
                 }
             }
         }
