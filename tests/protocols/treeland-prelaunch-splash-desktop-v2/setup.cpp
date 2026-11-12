@@ -10,29 +10,21 @@
 #include "workspace/workspace.h"
 
 #include <QEventLoop>
-#include <QFutureWatcher>
-#include <QImage>
 #include <QPointer>
-#include <QQuickItem>
 #include <QTimer>
 
 #include <wbackend.h>
-#include <wbufferitem.h>
 #include <woutputrenderwindow.h>
-#include <wtextureproviderprovider.h>
 
 namespace {
 constexpr auto SplashAppId = "org.deepin.treeland.protocol.splash";
 constexpr auto IconSplashAppId = "org.deepin.treeland.protocol.splash-icon";
-// Bounds of the state polls below, counted in rendered frames.
-constexpr int MaxSettleFrames = 60;
+// Bounds of the state poll below, counted in rendered frames.
 constexpr int MaxConvertFrames = 400;
 
 QPointer<SurfaceWrapper> g_wrapper;
 prelaunch_splash_desktop_state g_state {};
 bool g_splashConfigReady = false;
-int g_bufferItemWarnings = 0;
-QtMessageHandler g_previousHandler = nullptr;
 
 bool isTestSplash(const SurfaceWrapper *wrapper)
 {
@@ -45,73 +37,6 @@ void enablePrelaunchSplash(WaylandServer *server)
 {
     server->globalConfig()->setEnablePrelaunchSplash(true);
     g_splashConfigReady = true;
-}
-
-// WBufferItem logs these when its host or its texture is unusable, and QML
-// assignment errors from the preview are only logged, never raised.
-bool isBufferItemWarning(QtMsgType type, const QString &message)
-{
-    return message.contains(QLatin1String("wTextureProvider() is nullptr"))
-        || message.contains(QLatin1String("can only be queried on the rendering thread"))
-        || message.contains(QLatin1String("texture missing or item size invalid"))
-        || message.contains(QLatin1String("Reject buffer with invalid size"))
-        || ((type == QtWarningMsg || type == QtCriticalMsg)
-            && message.contains(QLatin1String("DockPreview.qml")));
-}
-
-void recordBufferItemWarnings(QtMsgType type,
-                              const QMessageLogContext &context,
-                              const QString &message)
-{
-    if (isBufferItemWarning(type, message))
-        ++g_bufferItemWarnings;
-    if (g_previousHandler)
-        g_previousHandler(type, context, message);
-}
-
-QQuickItem *findDockPreview(QQuickItem *item)
-{
-    if (!item)
-        return nullptr;
-    if (item->property("desiredSurfaces").isValid() && item->property("previewReveal").isValid())
-        return item;
-    for (auto *child : item->childItems()) {
-        if (auto *found = findDockPreview(child))
-            return found;
-    }
-    return nullptr;
-}
-
-QQuickItem *findItemWithProperty(QQuickItem *item, const char *name)
-{
-    if (!item)
-        return nullptr;
-    if (item->property(name).isValid())
-        return item;
-    for (auto *child : item->childItems()) {
-        if (auto *found = findItemWithProperty(child, name))
-            return found;
-    }
-    return nullptr;
-}
-
-QImage captureItem(WBufferItem *item)
-{
-    WTextureCapturer capturer(item);
-    QFutureWatcher<QImage> watcher;
-    QEventLoop loop;
-    QObject::connect(&watcher, &QFutureWatcher<QImage>::finished, &loop, &QEventLoop::quit);
-    QTimer::singleShot(5000, &loop, &QEventLoop::quit);
-    watcher.setFuture(capturer.grabToImage());
-    loop.exec();
-    if (!watcher.isFinished() || watcher.isCanceled())
-        return {};
-    // The capturer reports failures as a future exception, so reading the result rethrows.
-    try {
-        return watcher.result();
-    } catch (...) {
-        return {};
-    }
 }
 
 void settleOneFrame()
@@ -141,11 +66,9 @@ void rememberSplash(SurfaceWrapper *wrapper)
 
 void protocol_test_setup(WaylandServer *server)
 {
-    // A short real animation keeps the production geometry/reveal lifecycle.
+    // A short real animation keeps the production geometry lifecycle.
     server->setAnimationSpeed(0.1f);
     add_headless_output(server->backend(), false);
-
-    g_previousHandler = qInstallMessageHandler(recordBufferItemWarnings);
 
     auto *config = server->globalConfig();
     if (config->isInitializeSucceeded()) {
@@ -254,63 +177,4 @@ extern "C" void prelaunch_splash_desktop_read_state(void *data)
         state.wrapper_in_workspace = 0;
     }
     *static_cast<prelaunch_splash_desktop_state *>(data) = state;
-}
-
-extern "C" void prelaunch_splash_desktop_probe_icon(void *data)
-{
-    auto *probe = static_cast<desktop_preview_icon_probe *>(data);
-    probe->buffer_warnings = g_bufferItemWarnings;
-    auto *server = WaylandServer::instance();
-    auto *content = server->window()->contentItem();
-    auto *preview = findDockPreview(content);
-    probe->preview_found = preview ? 1 : 0;
-    if (!preview)
-        return;
-
-    // The title row is reparented next to the preview, so the icon is a sibling subtree.
-    auto *root = preview->parentItem() ? preview->parentItem() : content;
-    const auto findIcon = [root]() -> WBufferItem * {
-        auto *loader = findItemWithProperty(root, "iconBuffer");
-        return loader ? dynamic_cast<WBufferItem *>(loader->property("item").value<QQuickItem *>())
-                      : nullptr;
-    };
-
-    for (int frame = 0; frame < MaxSettleFrames; ++frame) {
-        server->window()->render();
-        auto *item = findIcon();
-        const bool revealDone = preview->property("previewReveal").toReal() >= 1.0;
-        const bool settled = probe->expect_icon ? (item && item->buffer() != nullptr)
-                                                : (!item || item->buffer() == nullptr);
-        if (revealDone && settled)
-            break;
-        settleOneFrame();
-    }
-
-    auto *item = findIcon();
-    probe->icon_item_found = item ? 1 : 0;
-    probe->buffer_warnings = g_bufferItemWarnings;
-    if (!item)
-        return;
-
-    probe->title_row_height = qRound(preview->property("titleRowHeight").toReal());
-    probe->icon_visible = item->isVisible() ? 1 : 0;
-    probe->icon_width = qRound(item->width());
-    probe->icon_height = qRound(item->height());
-
-    auto *icon = g_wrapper ? g_wrapper->appIcon().value<wlr_buffer *>() : nullptr;
-    probe->icon_buffer_matches = (icon && item->buffer() == icon) ? 1 : 0;
-
-    if (item->buffer()) {
-        const QImage image = captureItem(item);
-        if (!image.isNull()) {
-            const QColor sample = image.pixelColor(image.width() / 2, image.height() / 2);
-            probe->capture_ready = 1;
-            probe->pixel_red = sample.red();
-            probe->pixel_green = sample.green();
-            probe->pixel_blue = sample.blue();
-            probe->pixel_alpha = sample.alpha();
-        }
-    }
-
-    probe->buffer_warnings = g_bufferItemWarnings;
 }

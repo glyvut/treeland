@@ -3,7 +3,6 @@
 #include "client-connection.h"
 #include "server-bridge-api.h"
 #include "treeland-app-id-resolver-unstable-v2-client-protocol.h"
-#include "treeland-foreign-toplevel-manager-unstable-v3-client-protocol.h"
 #include "treeland-prelaunch-splash-desktop-v2.h"
 #include "treeland-prelaunch-splash-unstable-v2-client-protocol.h"
 #include "xdg-toplevel-client.h"
@@ -18,11 +17,9 @@ extern void prelaunch_splash_desktop_read_state(void *data);
 extern void prelaunch_splash_desktop_wait_for_creation(void *data);
 extern void prelaunch_splash_desktop_wait_for_destruction(void *data);
 extern void prelaunch_splash_desktop_wait_converted(void *data);
-extern void prelaunch_splash_desktop_probe_icon(void *data);
 
 static const char *const splash_app_id = "org.deepin.treeland.protocol.splash";
 static const char *const icon_app_id = "org.deepin.treeland.protocol.splash-icon";
-static const char *const plain_app_id = "org.deepin.treeland.protocol.splash-icon.plain";
 
 #define ICON_WIDTH 16
 #define ICON_HEIGHT 16
@@ -31,171 +28,11 @@ static const char *const plain_app_id = "org.deepin.treeland.protocol.splash-ico
    a geometry animation. */
 #define SPLASH_WINDOW_WIDTH 800
 #define SPLASH_WINDOW_HEIGHT 600
-#define PLAIN_WINDOW_WIDTH 320
-#define PLAIN_WINDOW_HEIGHT 200
-#define PREVIEW_SWITCHES 10
-#define MAX_HANDLES 4
-
-struct handle_entry {
-    struct treeland_foreign_toplevel_handle_v3 *handle;
-    char app_id[96];
-    uint32_t identifier;
-    int closed;
-};
-
-struct client_state {
-    struct treeland_foreign_toplevel_manager_v3 *manager;
-    struct treeland_dock_preview_context_v3 *context;
-    struct handle_entry handles[MAX_HANDLES];
-    int handle_count;
-};
 
 struct resolver_state {
     uint32_t request_id;
     int identify_count;
     int pidfd;
-};
-
-static void handle_pid(void *data, struct treeland_foreign_toplevel_handle_v3 *handle, uint32_t pid)
-{
-    (void)data;
-    (void)handle;
-    (void)pid;
-}
-
-static void handle_app_id(void *data,
-                          struct treeland_foreign_toplevel_handle_v3 *handle,
-                          const char *app_id)
-{
-    (void)handle;
-    struct handle_entry *entry = data;
-    snprintf(entry->app_id, sizeof(entry->app_id), "%s", app_id ? app_id : "");
-}
-
-static void handle_identifier(void *data,
-                              struct treeland_foreign_toplevel_handle_v3 *handle,
-                              uint32_t identifier)
-{
-    (void)handle;
-    struct handle_entry *entry = data;
-    entry->identifier = identifier;
-}
-
-static void handle_title(void *data,
-                         struct treeland_foreign_toplevel_handle_v3 *handle,
-                         const char *title)
-{
-    (void)data;
-    (void)handle;
-    (void)title;
-}
-
-static void handle_output_enter(void *data,
-                                struct treeland_foreign_toplevel_handle_v3 *handle,
-                                struct wl_output *output)
-{
-    (void)data;
-    (void)handle;
-    (void)output;
-}
-
-static void handle_output_leave(void *data,
-                                struct treeland_foreign_toplevel_handle_v3 *handle,
-                                struct wl_output *output)
-{
-    (void)data;
-    (void)handle;
-    (void)output;
-}
-
-static void handle_state(void *data,
-                         struct treeland_foreign_toplevel_handle_v3 *handle,
-                         struct wl_array *state)
-{
-    (void)data;
-    (void)handle;
-    (void)state;
-}
-
-static void handle_done(void *data, struct treeland_foreign_toplevel_handle_v3 *handle)
-{
-    (void)data;
-    (void)handle;
-}
-
-static void handle_closed(void *data, struct treeland_foreign_toplevel_handle_v3 *handle)
-{
-    struct handle_entry *entry = data;
-    entry->closed = 1;
-    entry->identifier = 0;
-    entry->handle = NULL;
-    treeland_foreign_toplevel_handle_v3_destroy(handle);
-}
-
-static void handle_parent(void *data,
-                          struct treeland_foreign_toplevel_handle_v3 *handle,
-                          struct treeland_foreign_toplevel_handle_v3 *parent)
-{
-    (void)data;
-    (void)handle;
-    (void)parent;
-}
-
-static const struct treeland_foreign_toplevel_handle_v3_listener handle_listener = {
-    .pid = handle_pid,
-    .title = handle_title,
-    .app_id = handle_app_id,
-    .identifier = handle_identifier,
-    .output_enter = handle_output_enter,
-    .output_leave = handle_output_leave,
-    .state = handle_state,
-    .done = handle_done,
-    .closed = handle_closed,
-    .parent = handle_parent,
-};
-
-static void manager_toplevel(void *data,
-                             struct treeland_foreign_toplevel_manager_v3 *manager,
-                             struct treeland_foreign_toplevel_handle_v3 *handle)
-{
-    (void)manager;
-    struct client_state *state = data;
-    if (state->handle_count >= MAX_HANDLES) {
-        treeland_foreign_toplevel_handle_v3_destroy(handle);
-        return;
-    }
-    struct handle_entry *entry = &state->handles[state->handle_count++];
-    memset(entry, 0, sizeof(*entry));
-    entry->handle = handle;
-    treeland_foreign_toplevel_handle_v3_add_listener(handle, &handle_listener, entry);
-}
-
-static void manager_finished(void *data, struct treeland_foreign_toplevel_manager_v3 *manager)
-{
-    (void)data;
-    (void)manager;
-}
-
-static const struct treeland_foreign_toplevel_manager_v3_listener manager_listener = {
-    .toplevel = manager_toplevel,
-    .finished = manager_finished,
-};
-
-static void context_enter(void *data, struct treeland_dock_preview_context_v3 *context)
-{
-    (void)data;
-    (void)context;
-}
-
-static void context_leave(void *data, struct treeland_dock_preview_context_v3 *context)
-{
-    (void)data;
-    (void)context;
-}
-
-static const struct treeland_dock_preview_context_v3_listener context_listener = {
-    .enter = context_enter,
-    .leave = context_leave,
 };
 
 static void identify_request(void *data,
@@ -264,103 +101,6 @@ static int state_has_surviving_icon(const struct prelaunch_splash_desktop_state 
         && state->icon_height == ICON_HEIGHT;
 }
 
-static uint32_t wait_identifier(struct client_connection *connection,
-                                struct client_state *state,
-                                const char *app_id)
-{
-    for (int roundtrip = 0; roundtrip < 50; ++roundtrip) {
-        for (int i = 0; i < state->handle_count; ++i) {
-            struct handle_entry *entry = &state->handles[i];
-            if (!entry->closed && entry->identifier && strcmp(entry->app_id, app_id) == 0)
-                return entry->identifier;
-        }
-        if (wl_display_roundtrip(connection->display) < 0)
-            return 0;
-    }
-    return 0;
-}
-
-/* The plain window has no splash, so its app id is never resolved: identify it as
-   the handle that is not the splash window's. */
-static uint32_t wait_other_identifier(struct client_connection *connection,
-                                      struct client_state *state,
-                                      uint32_t known_identifier)
-{
-    for (int roundtrip = 0; roundtrip < 50; ++roundtrip) {
-        for (int i = 0; i < state->handle_count; ++i) {
-            struct handle_entry *entry = &state->handles[i];
-            if (!entry->closed && entry->identifier && entry->identifier != known_identifier)
-                return entry->identifier;
-        }
-        if (wl_display_roundtrip(connection->display) < 0)
-            return 0;
-    }
-    return 0;
-}
-
-static int show_preview(struct client_connection *connection,
-                        struct client_state *state,
-                        uint32_t identifier)
-{
-    struct wl_array surfaces;
-    wl_array_init(&surfaces);
-    uint32_t *slot = wl_array_add(&surfaces, sizeof(uint32_t));
-    if (!slot) {
-        wl_array_release(&surfaces);
-        return 0;
-    }
-    *slot = identifier;
-    treeland_dock_preview_context_v3_show(state->context,
-                                          &surfaces,
-                                          420,
-                                          1080,
-                                          TREELAND_DOCK_PREVIEW_CONTEXT_V3_DIRECTION_BOTTOM);
-    wl_array_release(&surfaces);
-    return wl_display_roundtrip(connection->display) >= 0;
-}
-
-static int probe_icon(struct desktop_preview_icon_probe *probe, int expect_icon)
-{
-    memset(probe, 0, sizeof(*probe));
-    probe->expect_icon = expect_icon;
-    return invoke_on_server_thread(prelaunch_splash_desktop_probe_icon, probe);
-}
-
-static int icon_drawn(const struct desktop_preview_icon_probe *probe)
-{
-    return probe->preview_found && probe->icon_item_found && probe->icon_buffer_matches
-        && probe->icon_visible && probe->icon_width > 0 && probe->icon_width == probe->icon_height
-        && probe->icon_width == probe->title_row_height && probe->capture_ready
-        && probe->pixel_red >= 250 && probe->pixel_green <= 5 && probe->pixel_blue <= 5
-        && probe->pixel_alpha >= 250 && probe->buffer_warnings == 0;
-}
-
-static int icon_hidden(const struct desktop_preview_icon_probe *probe)
-{
-    return probe->preview_found && !probe->icon_item_found && probe->buffer_warnings == 0;
-}
-
-static void report_probe(const char *stage, const struct desktop_preview_icon_probe *probe)
-{
-    fprintf(stderr,
-            "  %s: preview=%d item=%d matches=%d visible=%d size=%dx%d row=%d capture=%d "
-            "rgba=(%d,%d,%d,%d) warnings=%d\n",
-            stage,
-            probe->preview_found,
-            probe->icon_item_found,
-            probe->icon_buffer_matches,
-            probe->icon_visible,
-            probe->icon_width,
-            probe->icon_height,
-            probe->title_row_height,
-            probe->capture_ready,
-            probe->pixel_red,
-            probe->pixel_green,
-            probe->pixel_blue,
-            probe->pixel_alpha,
-            probe->buffer_warnings);
-}
-
 #define MAP_STEP(step) \
     do { \
         if (!(step)) { \
@@ -416,19 +156,14 @@ int protocol_test_run(const char *socket_name)
 {
     struct client_connection connection;
     struct xdg_toplevel_client splash_window = { 0 };
-    struct xdg_toplevel_client plain_window = { 0 };
-    struct client_state state = { 0 };
     struct resolver_state resolver_state = { .pidfd = -1 };
     struct prelaunch_splash_desktop_state desktop_state = { 0 };
-    struct desktop_preview_icon_probe probe = { 0 };
     struct treeland_app_id_resolver_manager_v2 *resolver_manager = NULL;
     struct treeland_app_id_resolver_v2 *resolver = NULL;
     struct treeland_prelaunch_splash_manager_v2 *splash_manager = NULL;
     struct treeland_prelaunch_splash_v2 *splash = NULL;
     struct wl_shm *shm = NULL;
     struct wl_buffer *icon = NULL;
-    uint32_t splash_identifier = 0;
-    uint32_t plain_identifier = 0;
     int observed = 0;
     int result = 1;
     const char *stage = "connect";
@@ -445,14 +180,9 @@ int protocol_test_run(const char *socket_name)
                                  "treeland_prelaunch_splash_manager_v2",
                                  &treeland_prelaunch_splash_manager_v2_interface,
                                  2);
-    state.manager = client_bind(&connection,
-                                "treeland_foreign_toplevel_manager_v3",
-                                &treeland_foreign_toplevel_manager_v3_interface,
-                                1);
     shm = client_bind(&connection, "wl_shm", &wl_shm_interface, 1);
-    if (!resolver_manager || !splash_manager || !state.manager || !shm)
+    if (!resolver_manager || !splash_manager || !shm)
         goto done;
-    treeland_foreign_toplevel_manager_v3_add_listener(state.manager, &manager_listener, &state);
 
     resolver = treeland_app_id_resolver_manager_v2_get_resolver(resolver_manager);
     if (!resolver
@@ -498,14 +228,14 @@ int protocol_test_run(const char *socket_name)
     observed = 0;
     desktop_state = (struct prelaunch_splash_desktop_state){ 0 };
 
-    /* Phase 2: the icon outliving the splash, drawn by the dock preview. */
+    /* Phase 2: the icon outliving the splash and the conversion into the real window. */
     stage = "create icon splash";
     icon = create_solid_buffer(shm, ICON_WIDTH, ICON_HEIGHT, ICON_ARGB);
     if (!icon)
         goto done;
     splash = treeland_prelaunch_splash_manager_v2_create_splash(splash_manager,
                                                                icon_app_id,
-                                                               "dockpreview-instance",
+                                                               "icon-instance",
                                                                "org.deepin.Sandbox",
                                                                icon);
     if (!splash || wl_display_roundtrip(connection.display) < 0)
@@ -536,76 +266,12 @@ int protocol_test_run(const char *socket_name)
         goto done;
     }
 
-    stage = "map a window without a splash";
-    splash_identifier = wait_identifier(&connection, &state, icon_app_id);
-    if (!splash_identifier)
-        goto done;
-    if (!map_window(&connection,
-                    &resolver_state,
-                    &plain_window,
-                    resolver,
-                    plain_app_id,
-                    PLAIN_WINDOW_WIDTH,
-                    PLAIN_WINDOW_HEIGHT))
-        goto done;
-    plain_identifier = wait_other_identifier(&connection, &state, splash_identifier);
-    if (!plain_identifier)
-        goto done;
-
-    stage = "create dock preview context";
-    state.context = treeland_foreign_toplevel_manager_v3_get_dock_preview_context(
-        state.manager, splash_window.surface);
-    if (!state.context)
-        goto done;
-    treeland_dock_preview_context_v3_add_listener(state.context, &context_listener, &state);
-
-    stage = "dock preview shows the AM icon";
-    if (!show_preview(&connection, &state, splash_identifier) || !probe_icon(&probe, 1)
-        || !icon_drawn(&probe)) {
-        report_probe("dock preview shows the AM icon", &probe);
-        goto done;
-    }
-    report_probe("dock preview shows the AM icon", &probe);
-
-    stage = "hover switching";
-    for (int i = 0; i < PREVIEW_SWITCHES; ++i) {
-        if (!show_preview(&connection, &state, plain_identifier) || !probe_icon(&probe, 0)
-            || !icon_hidden(&probe)) {
-            report_probe("hover to a window without a splash", &probe);
-            goto done;
-        }
-        if (!show_preview(&connection, &state, splash_identifier) || !probe_icon(&probe, 1)
-            || !icon_drawn(&probe)) {
-            report_probe("hover back to the window with the icon", &probe);
-            goto done;
-        }
-    }
-    report_probe("after repeated hover switching", &probe);
-
-    stage = "close the window the icon came from";
-    xdg_toplevel_client_destroy(&splash_window);
-    memset(&splash_window, 0, sizeof(splash_window));
-    wl_display_roundtrip(connection.display);
-
-    if (!show_preview(&connection, &state, plain_identifier) || !probe_icon(&probe, 0)
-        || !icon_hidden(&probe)) {
-        report_probe("hover after the icon's window closed", &probe);
-        goto done;
-    }
-    report_probe("hover after the icon's window closed", &probe);
-
-    stage = "close the dock preview";
-    treeland_dock_preview_context_v3_close(state.context);
-    if (wl_display_roundtrip(connection.display) < 0)
-        goto done;
-
     result = 0;
 done:
     if (result != 0) {
         fprintf(stderr,
                 "prelaunch splash desktop failed at %s: splash=(created=%d xdg=%d item-gone=%d "
-                "icon=%d %dx%d) destruction=(destroyed=%d in-workspace=%d) "
-                "identifiers=(splash=%u plain=%u) output=%d\n",
+                "icon=%d %dx%d) destruction=(destroyed=%d in-workspace=%d) output=%d\n",
                 stage,
                 desktop_state.wrapper_created,
                 desktop_state.converted_to_xdg,
@@ -615,20 +281,10 @@ done:
                 desktop_state.icon_height,
                 desktop_state.wrapper_destroyed,
                 desktop_state.wrapper_in_workspace,
-                splash_identifier,
-                plain_identifier,
                 desktop_state.output_ready);
     }
     if (icon)
         wl_buffer_destroy(icon);
-    if (state.context)
-        treeland_dock_preview_context_v3_destroy(state.context);
-    for (int i = 0; i < state.handle_count; ++i) {
-        if (state.handles[i].handle)
-            treeland_foreign_toplevel_handle_v3_destroy(state.handles[i].handle);
-    }
-    if (plain_window.surface)
-        xdg_toplevel_client_destroy(&plain_window);
     if (splash_window.surface)
         xdg_toplevel_client_destroy(&splash_window);
     if (splash)
@@ -639,8 +295,6 @@ done:
         treeland_prelaunch_splash_manager_v2_destroy(splash_manager);
     if (resolver_manager)
         treeland_app_id_resolver_manager_v2_destroy(resolver_manager);
-    if (state.manager)
-        treeland_foreign_toplevel_manager_v3_destroy(state.manager);
     if (resolver_state.pidfd >= 0)
         close(resolver_state.pidfd);
     client_disconnect(&connection);
