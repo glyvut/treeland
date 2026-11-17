@@ -26,8 +26,6 @@ Item {
     // Whole-slot opacity: a new slot starts at the tail of the stack, fades
     // in as it slides out, and fades out while it collapses.
     property real reveal: 1
-    // The slot owns its border; the view only decides which slot shows it.
-    property real borderOpacity: 0
     // Content cross-fade, like the tooltip layers.
     property real contentOpacity: 1
     // Pictures that left this slot and are still fading out, one per
@@ -148,7 +146,6 @@ Item {
         collapsing = true;
         // Freeze the picture while the window can still provide it;
         closeSnapshot.scheduleUpdate();
-        borderOpacity = 0;
         revealAnimation.stop();
         if (preview.enableAnimation) {
             contentReveal.stop();
@@ -267,8 +264,12 @@ Item {
         contentReveal.restart();
     }
 
+    // Background of the picture.
     Rectangle {
-        anchors.fill: parent
+        x: PopoverStyle.frameBorderWidth
+        y: PopoverStyle.frameBorderWidth
+        width: Math.max(0, slot.width - 2 * PopoverStyle.frameBorderWidth)
+        height: Math.max(0, slot.height - 2 * PopoverStyle.frameBorderWidth)
         radius: view.radius
         color: PopoverStyle.itemBackground
     }
@@ -393,23 +394,6 @@ Item {
         }
     }
 
-    Rectangle {
-        anchors.fill: parent
-        radius: view.radius + PopoverStyle.frameBorderWidth
-        color: "transparent"
-        border.width: PopoverStyle.frameBorderWidth
-        opacity: slot.borderOpacity
-        property D.Palette borderPalette: D.Palette {
-            normal {
-                common: Qt.rgba(0, 0, 0, 0.2)
-            }
-            normalDark {
-                common: Qt.rgba(1, 1, 1, 0.3)
-            }
-        }
-        border.color: D.ColorSelector.borderPalette
-    }
-
     Connections {
         target: slot.wrapper
         function onAboutToBeInvalidated() {
@@ -429,7 +413,6 @@ Item {
             preview.previewWindow(slot.wrapper);
             view.currentSlot = slot.slotIndex;
             view.hoveredSlot = slot;
-            view.updateHoverBorder();
         }
     }
 
@@ -462,14 +445,6 @@ Item {
         to: 1
         duration: preview.aniDuration
         easing.type: Easing.OutExpo
-    }
-
-    Behavior on borderOpacity {
-        enabled: preview.enableAnimation
-        NumberAnimation {
-            duration: preview.aniDuration
-            easing.type: Easing.OutExpo
-        }
     }
 
     NumberAnimation {

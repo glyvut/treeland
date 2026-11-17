@@ -6,6 +6,7 @@ import QtQuick.Layouts
 
 import Waylib.Server
 import Treeland
+import org.deepin.dtk 1.0 as D
 
 Item {
     id: root
@@ -26,8 +27,14 @@ Item {
     property var slots: []
     // List row the title follows.
     property int currentSlot: 0
-    // The slot under the pointer; it shows the border.
+    // The slot under the pointer; the highlight frame follows it.
     property var hoveredSlot: null
+    // The slot the highlight frame is on.
+    property var highlightSlot: null
+    onHoveredSlotChanged: {
+        if (root.hoveredSlot)
+            root.highlightSlot = root.hoveredSlot;
+    }
 
     // The window the title row describes: the highlighted preview, clamped.
     readonly property var currentWrapper: {
@@ -56,14 +63,6 @@ Item {
             slots[i].freezePicture();
     }
 
-    // The hover border belongs to a slot, but only the slot under the pointer
-    // shows it.
-    function updateHoverBorder() {
-        const slots = root.slots;
-        for (let i = 0; i < slots.length; ++i)
-            slots[i].borderOpacity = slots[i] === root.hoveredSlot ? 1 : 0;
-    }
-
     // Pick the slot under the pointer again after the one it was on went away.
     function refreshHoveredSlot() {
         const slots = root.slots;
@@ -75,7 +74,6 @@ Item {
             }
         }
         root.hoveredSlot = hovered;
-        root.updateHoverBorder();
     }
 
     function dropSlot(slot) {
@@ -98,6 +96,7 @@ Item {
         const slots = root.slots;
         root.slots = [ ];
         root.hoveredSlot = null;
+        root.highlightSlot = null;
         for (let i = 0; i < slots.length; ++i)
             slots[i].destroy();
     }
@@ -254,7 +253,6 @@ Item {
             root.hoveredSlot = null;
             Qt.callLater(root.refreshHoveredSlot);
         }
-        root.updateHoverBorder();
     }
 
     // Clip at the frame's content rect: the title row leaves the top free, and
@@ -302,6 +300,55 @@ Item {
                 id: slotLayer
                 width: preview.thumbnailContentSize.width
                 height: preview.thumbnailContentSize.height
+
+                Rectangle {
+                    id: hoverFrame
+
+                    readonly property var slot: root.highlightSlot
+                    readonly property bool slides: preview.enableAnimation
+                                                   && slot !== null && slot.progress === 1
+                                                   && hoverFrame.opacity > 0
+                    property rect frameRect: slot ? Qt.rect(slot.x, slot.y,
+                                                            slot.width, slot.height)
+                                                  : Qt.rect(0, 0, 0, 0)
+
+                    z: -1
+                    visible: slot !== null && opacity > 0
+                    opacity: root.hoveredSlot !== null ? 1 : 0
+
+                    x: frameRect.x
+                    y: frameRect.y
+                    width: frameRect.width
+                    height: frameRect.height
+                    radius: root.radius + PopoverStyle.frameBorderWidth
+                    color: "transparent"
+                    border.width: PopoverStyle.frameBorderWidth
+                    property D.Palette borderPalette: D.Palette {
+                        normal {
+                            common: Qt.rgba(0, 0, 0, 0.2)
+                        }
+                        normalDark {
+                            common: Qt.rgba(1, 1, 1, 0.3)
+                        }
+                    }
+                    border.color: D.ColorSelector.borderPalette
+
+                    Behavior on opacity {
+                        enabled: preview.enableAnimation
+                        NumberAnimation {
+                            duration: preview.aniDuration
+                            easing.type: Easing.OutExpo
+                        }
+                    }
+
+                    Behavior on frameRect {
+                        enabled: hoverFrame.slides
+                        PropertyAnimation {
+                            duration: preview.aniDuration
+                            easing.type: Easing.OutExpo
+                        }
+                    }
+                }
             }
 
             HoverHandler {
@@ -312,7 +359,6 @@ Item {
                         return;
                     root.hoveredSlot = null;
                     preview.stopPreviewWindow();
-                    root.updateHoverBorder();
                 }
             }
         }
