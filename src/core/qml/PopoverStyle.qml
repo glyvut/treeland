@@ -71,6 +71,9 @@ QtObject {
     // Gap between the button and the viewport edge it points away from.
     readonly property int scrollHintMargin: 3
 
+    // Border a preview slot carries around its picture.
+    readonly property int frameBorderWidth: 4
+
     // Placeholder behind a preview thumbnail. This is DPalette::ItemBackground,
     // which DTK does not export to QML in this version, so the two palette
     // values are kept here instead of being inlined in DockPreview.qml.

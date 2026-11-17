@@ -14,7 +14,7 @@ Item {
     // How long the closing window's picture takes to disappear. Every slot and
     // layer around it keeps using aniDuration; only the picture goes early.
     property int closeContentDuration: 100
-    property int spacing: 5
+    property int spacing: 10 - 2 * PopoverStyle.frameBorderWidth
 
     readonly property int panelHorizontalPadding: PopoverStyle.tooltipHorizontalPadding
     readonly property int panelVerticalPadding: PopoverStyle.tooltipVerticalPadding
@@ -68,18 +68,19 @@ Item {
     // Chrome the thumbnail adds above its content; only it carries a header.
     readonly property real titleRowChrome: root.titleRowHeight + root.spacing
 
-    // Natural size of one preview slot: the short side is fixed (120 tall on a
-    // horizontal dock, 240 wide on a vertical one), the other side follows the
-    // window's aspect ratio and is clamped so one slot never dominates the view.
+    // Natural size of one preview slot: fixed the short side.
     function previewSlotSize(wrapper, horizontal) {
+        const border = 2 * PopoverStyle.frameBorderWidth;
         if (horizontal) {
             if (!wrapper || !(wrapper.height > 0))
-                return Qt.size(80, 120);
-            return Qt.size(Math.max(80, Math.min(240, 120 * wrapper.width / wrapper.height)), 120);
+                return Qt.size(80 + border, 120 + border);
+            const width = Math.max(80, Math.min(240, 120 * wrapper.width / wrapper.height));
+            return Qt.size(width + border, 120 + border);
         }
         if (!wrapper || !(wrapper.width > 0))
-            return Qt.size(240, 80);
-        return Qt.size(240, Math.max(80, Math.min(120, 240 * wrapper.height / wrapper.width)));
+            return Qt.size(240 + border, 80 + border);
+        const height = Math.max(80, Math.min(120, 240 * wrapper.height / wrapper.width));
+        return Qt.size(240 + border, height + border);
     }
 
     // Where an item of the given size scales from: the edge of the frame that
@@ -97,8 +98,7 @@ Item {
         }
     }
 
-    // Natural size of the content in a slot: the window's picture fits the slot
-    // without ever stretching it.
+    // Natural size of the content in a slot.
     function naturalContentSize(slotRect, sourceWidth, sourceHeight) {
         if (!slotRect || !(slotRect.width > 0) || !(slotRect.height > 0)
                 || !(sourceWidth > 0) || !(sourceHeight > 0))
@@ -106,8 +106,7 @@ Item {
 
         const scale = Math.min(slotRect.width / sourceWidth,
                                slotRect.height / sourceHeight);
-        return Qt.size(Math.max(0, sourceWidth * scale - 4),
-                       Math.max(0, sourceHeight * scale - 4));
+        return Qt.size(sourceWidth * scale, sourceHeight * scale);
     }
 
     // Where every window sits in the content, in content coordinates. Both the

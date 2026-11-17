@@ -70,9 +70,17 @@ Item {
                 && a.width === b.width && a.height === b.height;
     }
 
+    // The rect the picture may fill: the slot box without its border.
+    function innerRect(slotRect) {
+        const border = PopoverStyle.frameBorderWidth;
+        return Qt.rect(slotRect.x + border, slotRect.y + border,
+                       Math.max(0, slotRect.width - 2 * border),
+                       Math.max(0, slotRect.height - 2 * border));
+    }
+
     function setContentSize(newWrapper, rect, animated) {
         contentSizeAnimated = animated && preview.enableAnimation;
-        contentSize = preview.naturalContentSize(rect,
+        contentSize = preview.naturalContentSize(slot.innerRect(rect),
                                                  newWrapper ? newWrapper.width : 0,
                                                  newWrapper ? newWrapper.height : 0);
     }
@@ -207,7 +215,7 @@ Item {
         if (!wrapper || !wrapperAlive)
             return;
 
-        const layer = outgoingLayerComponent.createObject(contentClip);
+        const layer = outgoingLayerComponent.createObject(contentLayers);
         if (!layer) {
             console.warn(preview.loggingCategory, "failed to create a slot layer");
             return;
@@ -266,7 +274,7 @@ Item {
     }
 
     Item {
-        id: contentClip
+        id: contentLayers
         anchors.fill: parent
         clip: true
 
@@ -275,8 +283,7 @@ Item {
             anchors.centerIn: parent
             implicitWidth: slot.contentSize.width
             implicitHeight: slot.contentSize.height
-            opacity: slot.contentOpacity
-            visible: slot.wrapperAlive
+            visible: false
             live: true
             hideSource: false
             smooth: true
@@ -291,33 +298,72 @@ Item {
             anchors.centerIn: parent
             implicitWidth: slot.contentSize.width
             implicitHeight: slot.contentSize.height
-            // The same early fade as the live picture, so a window that
-            // is already gone does not keep it on screen.
-            opacity: slot.contentOpacity
-            visible: slot.collapsing || slot.frozen
+            visible: false
             live: false
             hideSource: false
             smooth: true
-            z: 1
             sourceItem: (slot.collapsing || slot.frozen) ? contentSource : null
+        }
+
+        // The rounded contour every picture is cut by.
+        Rectangle {
+            id: pictureMask
+            anchors.centerIn: parent
+            width: slot.contentSize.width
+            height: slot.contentSize.height
+            radius: view.radius
+            visible: false
+        }
+
+        D.OpacityMask {
+            anchors.centerIn: parent
+            width: slot.contentSize.width
+            height: slot.contentSize.height
+            source: contentSource
+            maskSource: pictureMask
+            opacity: slot.contentOpacity
+            visible: slot.wrapperAlive
+        }
+
+        D.OpacityMask {
+            anchors.centerIn: parent
+            width: slot.contentSize.width
+            height: slot.contentSize.height
+            source: closeSnapshot
+            maskSource: pictureMask
+            opacity: slot.contentOpacity
+            visible: slot.collapsing || slot.frozen
+            z: 1
         }
     }
 
     Component {
         id: outgoingLayerComponent
 
-        ShaderEffectSource {
+        Item {
             id: outgoingLayer
             anchors.centerIn: parent
-            implicitWidth: slot.contentSize.width
-            implicitHeight: slot.contentSize.height
-            // Snapshot once; the layer only fades from here on.
-            live: false
-            hideSource: false
-            smooth: true
+            width: slot.contentSize.width
+            height: slot.contentSize.height
             z: 1
             property var wrapper: null
-            sourceItem: wrapper
+
+            ShaderEffectSource {
+                id: outgoingPicture
+                anchors.fill: parent
+                // Snapshot once; the layer only fades from here on.
+                live: false
+                hideSource: false
+                smooth: true
+                visible: false
+                sourceItem: outgoingLayer.wrapper
+            }
+
+            D.OpacityMask {
+                anchors.fill: parent
+                source: outgoingPicture
+                maskSource: pictureMask
+            }
 
             function fadeOut() {
                 if (!preview.enableAnimation) {
@@ -349,9 +395,9 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        radius: view.radius + 4
+        radius: view.radius + PopoverStyle.frameBorderWidth
         color: "transparent"
-        border.width: 4
+        border.width: PopoverStyle.frameBorderWidth
         opacity: slot.borderOpacity
         property D.Palette borderPalette: D.Palette {
             normal {
