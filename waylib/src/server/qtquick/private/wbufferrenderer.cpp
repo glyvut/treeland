@@ -70,6 +70,13 @@ static void applyTransform(QSGSoftwareRenderer *renderer, const QTransform &t)
 
     auto nodeIter = W_PRIVATE_MEMBER(*renderer, QSGAbsSoftRenderer_m_nodes_tag{}).begin();
     while (nodeIter != W_PRIVATE_MEMBER(*renderer, QSGAbsSoftRenderer_m_nodes_tag{}).end()) {
+        // The clear node covers the render target, not the source item. Moving
+        // it with a negative sourceRect leaves the top/left border uncleared
+        // and repeatedly blends translucent SSD pixels over the old buffer.
+        if (nodeIter.key() == W_PRIVATE_MEMBER(*renderer, QSGAbsSoftRenderer_m_background_tag{})) {
+            ++nodeIter;
+            continue;
+        }
         auto node = *nodeIter;
         node->setTransform(node->transform() * t);
 
@@ -113,10 +120,27 @@ WOutput *WBufferRenderer::output() const
 
 void WBufferRenderer::setOutput(WOutput *output)
 {
+    Q_ASSERT(!output || !m_target.format);
     if (m_output == output)
         return;
     m_output = output;
     Q_EMIT sceneGraphChanged();
+}
+
+void WBufferRenderer::setRenderTarget(const RenderTarget &target)
+{
+    Q_ASSERT(!m_output);
+    m_target = target;
+}
+
+wlr_swapchain *WBufferRenderer::prepareRenderTarget()
+{
+    auto *window = renderWindow();
+    if (!window || !window->renderer() || !window->allocator() || m_target.pixelSize.isEmpty())
+        return nullptr;
+    if (!ensureSwapchain(window->renderer(), window->allocator(), m_target.pixelSize, m_target.format))
+        return nullptr;
+    return m_swapchain.get();
 }
 
 int WBufferRenderer::sourceCount() const
@@ -329,6 +353,31 @@ QTransform WBufferRenderer::inputMapToOutput(const QRectF &sourceRect, const QRe
     return t;
 }
 
+bool WBufferRenderer::ensureSwapchain(wlr_renderer *renderer, wlr_allocator *allocator,
+                                      const QSize &size, uint32_t format)
+{
+    const auto *renderFormat = pickFormat(renderer, format);
+    if (!renderFormat) {
+        qCWarning(lcWlBufferRenderer, "wlr_renderer doesn't support format 0x%s", drmGetFormatName(format));
+        return false;
+    }
+    if (!m_swapchain || QSize(m_swapchain->width, m_swapchain->height) != size
+        || m_swapchain->format.format != format) {
+        m_swapchain.reset(wlr_swapchain_create(allocator, size.width(), size.height(), renderFormat));
+    }
+    return bool(m_swapchain);
+}
+
+wlr_buffer *WBufferRenderer::beginOffscreenRender()
+{
+    Q_ASSERT(!state.buffer && !m_output);
+    Q_EMIT beforeRendering();
+    if (!prepareRenderTarget())
+        return nullptr;
+    return beginRenderBuffer(renderWindow()->renderer(), m_target.pixelSize, m_target.devicePixelRatio,
+                             RedirectOpenGLContextDefaultFrameBufferObject, m_target.colorMode);
+}
+
 wlr_buffer *WBufferRenderer::beginRender(const QSize &pixelSize, qreal devicePixelRatio,
                                         uint32_t format, RenderFlags flags,
                                         WGlobal::ColorContentsMode mode)
@@ -343,18 +392,8 @@ wlr_buffer *WBufferRenderer::beginRender(const QSize &pixelSize, qreal devicePix
 
     // configure swapchain
     if (flags.testFlag(RenderFlag::DontConfigureSwapchain)) {
-        auto renderFormat = pickFormat(m_output->renderer(), format);
-        if (!renderFormat) {
-            qCWarning(lcWlBufferRenderer, "wlr_renderer doesn't support format 0x%s", drmGetFormatName(format));
+        if (!ensureSwapchain(m_output->renderer(), m_output->allocator(), pixelSize, format))
             return nullptr;
-        }
-
-        if (!m_swapchain || QSize(m_swapchain->width, m_swapchain->height) != pixelSize
-            || m_swapchain->format.format != renderFormat->format) {
-            m_swapchain.reset(wlr_swapchain_create(m_output->allocator(), pixelSize.width(), pixelSize.height(), renderFormat));
-            if (!m_swapchain)
-                return nullptr;
-        }
     } else if (flags.testFlag(RenderFlag::UseCursorFormats)) {
         // The configure helpers take a wlr_swapchain**; hand ownership out
         // temporarily and take it back (possibly a new swapchain) afterwards.
@@ -376,13 +415,20 @@ wlr_buffer *WBufferRenderer::beginRender(const QSize &pixelSize, qreal devicePix
         m_swapchain.reset(sc);
     }
 
+    return beginRenderBuffer(m_output->renderer(), pixelSize, devicePixelRatio, flags, mode);
+}
+
+wlr_buffer *WBufferRenderer::beginRenderBuffer(wlr_renderer *renderer, const QSize &pixelSize,
+                                              qreal devicePixelRatio, RenderFlags flags,
+                                              WGlobal::ColorContentsMode mode)
+{
     // TODO: Support scanout buffer of wlr_surface(from WSurfaceItem)
     auto buffer = wlr_swapchain_acquire(m_swapchain.get());
     if (!buffer)
         return nullptr;
 
     if (!m_renderHelper)
-        m_renderHelper = new WRenderHelper(m_output->renderer());
+        m_renderHelper = new WRenderHelper(renderer);
     m_renderHelper->setSize(pixelSize);
 
     auto wd = QQuickWindowPrivate::get(window());
@@ -512,6 +558,9 @@ void WBufferRenderer::render(int sourceIndex, const QMatrix4x4 &renderMatrix,
             state.worldTransform.optimize();
             auto image = getImageFrom(state.renderTarget.rt());
             image->setDevicePixelRatio(devicePixelRatio);
+            if (state.colorContentsMode == WGlobal::ColorContentsMode::Clear) {
+                softwareRenderer->markDirty();
+            }
 
             // TODO: Should set to QSGSoftwareRenderer, but it's not support specify matrix.
             // If transform is changed, it will full repaint.
