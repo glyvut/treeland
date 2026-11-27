@@ -107,6 +107,8 @@ WBufferRenderer::WBufferRenderer(QQuickItem *parent)
 
 WBufferRenderer::~WBufferRenderer()
 {
+    if (m_target.format)
+        cancelOffscreenRender();
     cleanTextureProvider();
     resetSources();
 
@@ -141,6 +143,18 @@ wlr_swapchain *WBufferRenderer::prepareRenderTarget()
     if (!ensureSwapchain(window->renderer(), window->allocator(), m_target.pixelSize, m_target.format))
         return nullptr;
     return m_swapchain.get();
+}
+
+void WBufferRenderer::requestOffscreenRender(const QRectF &sourceRect)
+{
+    if (auto *window = renderWindow())
+        window->requestOffscreenRender(this, sourceRect);
+}
+
+void WBufferRenderer::cancelOffscreenRender()
+{
+    if (auto *window = renderWindow())
+        window->cancelOffscreenRender(this);
 }
 
 int WBufferRenderer::sourceCount() const

@@ -65,6 +65,8 @@ public:
 
     void setRenderTarget(const RenderTarget &target);
     wlr_swapchain *prepareRenderTarget();
+    void requestOffscreenRender(const QRectF &sourceRect);
+    void cancelOffscreenRender();
 
     bool cacheBuffer() const;
     void setCacheBuffer(bool newCacheBuffer);
@@ -99,6 +101,8 @@ Q_SIGNALS:
     void cacheBufferChanged();
     void beforeRendering();
     void afterRendering();
+    // Buffer is locked for synchronous receivers; null means rendering failed.
+    void offscreenRenderFinished(wlr_buffer *buffer);
 
 protected:
     wlr_buffer *beginRender(const QSize &pixelSize, qreal devicePixelRatio,

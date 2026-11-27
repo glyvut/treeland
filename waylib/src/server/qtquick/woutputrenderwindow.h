@@ -86,6 +86,9 @@ private:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
     friend class WOutputViewport;
+    friend class WBufferRenderer;
+    void requestOffscreenRender(WBufferRenderer *renderer, const QRectF &sourceRect);
+    void cancelOffscreenRender(WBufferRenderer *renderer);
     QList<WOutputLayer*> layers(const WOutputViewport *output) const;
     QList<WOutputLayer*> hardwareLayers(const WOutputViewport *output) const;
 };

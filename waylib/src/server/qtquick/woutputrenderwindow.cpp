@@ -451,6 +451,11 @@ public:
                     bool forceRender);
     void doRender(wlr_output *needsFrameOutput, const QList<OutputHelper*> &outputs,
                   bool forceRender, bool doCommit);
+    void beginQuickFrame(bool advanceAnimations);
+    void endQuickFrame();
+    void finishQuickFrame();
+    void scheduleOffscreenRender();
+    void doOffscreenRender();
 
     inline void pushRenderer(WBufferRenderer *renderer) {
         rendererList.push(renderer);
@@ -473,6 +478,13 @@ public:
     bool componentCompleted = true;
     bool inRendering = false;
     bool renderEnabled = true;
+    bool offscreenRenderQueued = false;
+
+    struct OffscreenRequest {
+        QPointer<WBufferRenderer> renderer;
+        QRectF sourceRect;
+    };
+    QList<OffscreenRequest> offscreenRequests;
 
     WPointer<wlr_renderer> m_renderer;
     WPointer<wlr_allocator> m_allocator;
@@ -1354,6 +1366,7 @@ void WOutputRenderWindowPrivate::init()
     eventJunkman->setZ(std::numeric_limits<qreal>::lowest());
 
     Q_EMIT q->initialized();
+    scheduleOffscreenRender();
 }
 
 void WOutputRenderWindowPrivate::init(OutputHelper *helper)
@@ -1567,9 +1580,115 @@ static void QQuickAnimatorController_advance(QQuickAnimatorController *ac)
         W_PRIVATE_MEMBER(*ac, QQuickAnimCtrl_m_window_tag{})->update();
 }
 
+void WOutputRenderWindowPrivate::beginQuickFrame(bool advanceAnimations)
+{
+    W_Q(WOutputRenderWindow);
+    // Drive plain QML animations from the frame itself, so their values for
+    // this frame are taken before the scene is polished and synced. The
+    // driver is thread-local, so rendering has to happen on the thread that
+    // installed it.
+    if (advanceAnimations && animationDriver->isRunning())
+        animationDriver->advance();
+
+    rc()->polishItems();
+
+    if (QSGRendererInterface::isApiRhiBased(WRenderHelper::getGraphicsApi()))
+        rc()->beginFrame();
+    rc()->sync();
+
+    if (advanceAnimations)
+        QQuickAnimatorController_advance(animationController.get());
+    Q_EMIT q->beforeRendering();
+    runAndClearJobs(&beforeRenderingJobs);
+}
+
+void WOutputRenderWindowPrivate::endQuickFrame()
+{
+    W_Q(WOutputRenderWindow);
+    Q_EMIT q->afterRendering();
+    runAndClearJobs(&afterRenderingJobs);
+
+    if (QSGRendererInterface::isApiRhiBased(WRenderHelper::getGraphicsApi()))
+        rc()->endFrame();
+}
+
+void WOutputRenderWindowPrivate::finishQuickFrame()
+{
+    resetGlState();
+
+    // Do not keep the compositor's GL context current for subsequent wlroots work.
+    if (glContext)
+        glContext->doneCurrent();
+
+    inRendering = false;
+    scheduleOffscreenRender();
+}
+
+void WOutputRenderWindowPrivate::scheduleOffscreenRender()
+{
+    if (offscreenRequests.isEmpty() || offscreenRenderQueued || inRendering
+        || !renderEnabled || !isInitialized())
+        return;
+
+    offscreenRenderQueued = true;
+    QMetaObject::invokeMethod(q_func(), [this] {
+        offscreenRenderQueued = false;
+        doOffscreenRender();
+    }, Qt::QueuedConnection);
+}
+
+void WOutputRenderWindowPrivate::doOffscreenRender()
+{
+    if (!renderEnabled || inRendering)
+        return;
+
+    W_Q(WOutputRenderWindow);
+    offscreenRequests.removeIf([q](const OffscreenRequest &request) {
+        return !request.renderer || request.renderer->window() != q;
+    });
+    if (offscreenRequests.isEmpty())
+        return;
+
+    Q_ASSERT(rendererList.isEmpty());
+    inRendering = true;
+    beginQuickFrame(false);
+
+    QPointer<WBufferRenderer> renderer;
+    WBufferUnlockPtr result;
+    // Polishing and sync can update or cancel the request before we start drawing.
+    if (renderEnabled && !offscreenRequests.isEmpty()) {
+        const auto request = offscreenRequests.takeFirst();
+        renderer = request.renderer;
+        if (renderer && renderer->window() == q) {
+            const auto sources = renderer->sourceList();
+            const bool sourcesReady = !sources.isEmpty() && std::ranges::all_of(sources, [q](QQuickItem *item) {
+                return item && item->window() == q && WQmlHelper::getRootNode(item);
+            });
+            if (sourcesReady) {
+                if (auto *buffer = renderer->beginOffscreenRender()) {
+                    result.reset(wlr_buffer_lock(buffer));
+                    pushRenderer(renderer);
+                    for (int i = 0; i < sources.size(); ++i)
+                        renderer->render(i, {}, request.sourceRect);
+                    rendererList.pop();
+                }
+            }
+        }
+    }
+
+    endQuickFrame();
+    if (result && renderer)
+        renderer->endRender();
+    finishQuickFrame();
+
+    if (renderer)
+        Q_EMIT renderer->offscreenRenderFinished(result.get());
+    Q_EMIT q->renderEnd({});
+}
+
 void WOutputRenderWindowPrivate::doRender(wlr_output *needsFrameOutput,
-                                          const QList<OutputHelper *> &outputs,
-                                          bool forceRender, bool doCommit)
+                                           const QList<OutputHelper *> &outputs,
+                                           bool forceRender, bool doCommit)
 {
     Q_ASSERT(rendererList.isEmpty());
     Q_ASSERT(!inRendering);
@@ -1583,30 +1702,9 @@ void WOutputRenderWindowPrivate::doRender(wlr_output *needsFrameOutput,
         layer->beforeRender(q);
     }
 
-    // Drive plain QML animations from the frame itself, so their values for
-    // this frame are taken before the scene is polished and synced. The
-    // driver is thread-local, so rendering has to happen on the thread that
-    // installed it.
-    if (animationDriver->isRunning())
-        animationDriver->advance();
-
-    rc()->polishItems();
-
-    if (QSGRendererInterface::isApiRhiBased(WRenderHelper::getGraphicsApi()))
-        rc()->beginFrame();
-    rc()->sync();
-
-    QQuickAnimatorController_advance(animationController.get());
-    Q_EMIT q->beforeRendering();
-    runAndClearJobs(&beforeRenderingJobs);
-
+    beginQuickFrame(true);
     auto needsCommit = doRenderOutputs(needsFrameOutput, outputs, forceRender);
-
-    Q_EMIT q->afterRendering();
-    runAndClearJobs(&afterRenderingJobs);
-
-    if (QSGRendererInterface::isApiRhiBased(WRenderHelper::getGraphicsApi()))
-        rc()->endFrame();
+    endQuickFrame();
 
     // prevent gles2-render exception in wlroots.
     // wlroots may have render operations after commit, so do
@@ -1643,17 +1741,7 @@ void WOutputRenderWindowPrivate::doRender(wlr_output *needsFrameOutput,
         }
     }
 
-    resetGlState();
-
-    // On Intel&Nvidia multi-GPU environment, wlroots using Intel card do render for all
-    // outputs, and blit nvidia's output buffer in drm_connector_state_update_primary_fb,
-    // the 'blit' behavior will make EGL context to Nvidia renderer. So must done current
-    // OpenGL context here in order to ensure QtQuick always make EGL context to Intel
-    // renderer before next frame.
-    if (glContext)
-        glContext->doneCurrent();
-
-    inRendering = false;
+    finishQuickFrame();
 
     // Since the animation clock is advanced by the frame itself, the frame loop
     // has to be kept running for as long as animations are alive: an animation
@@ -1963,9 +2051,36 @@ bool WOutputRenderWindow::inRendering() const
     return d->inRendering;
 }
 
-void WOutputRenderWindow::setRenderEnabled(bool enabled) {
+void WOutputRenderWindow::setRenderEnabled(bool enabled)
+{
     Q_D(WOutputRenderWindow);
+    if (d->renderEnabled == enabled)
+        return;
     d->renderEnabled = enabled;
+    if (enabled) {
+        update();
+        d->scheduleOffscreenRender();
+    }
+}
+
+void WOutputRenderWindow::requestOffscreenRender(WBufferRenderer *renderer, const QRectF &sourceRect)
+{
+    Q_D(WOutputRenderWindow);
+    auto &requests = d->offscreenRequests;
+    auto existing = std::ranges::find_if(requests, [renderer](const auto &request) {
+        return request.renderer == renderer;
+    });
+    if (existing == requests.end())
+        requests.append({renderer, sourceRect});
+    else
+        existing->sourceRect = sourceRect;
+    d->scheduleOffscreenRender();
+}
+
+void WOutputRenderWindow::cancelOffscreenRender(WBufferRenderer *renderer)
+{
+    Q_D(WOutputRenderWindow);
+    d->offscreenRequests.removeIf([renderer](const auto &request) { return request.renderer == renderer; });
 }
 
 QList<QPointer<QQuickItem>> WOutputRenderWindow::paintOrderItemList(QQuickItem *root, std::function<bool(QQuickItem*)> filter)
