@@ -46,6 +46,13 @@ public:
     };
     Q_DECLARE_FLAGS(RenderFlags, RenderFlag)
 
+    struct RenderTarget {
+        QSize pixelSize;
+        qreal devicePixelRatio = 1.0;
+        uint32_t format = 0;
+        WGlobal::ColorContentsMode colorMode = WGlobal::ColorContentsMode::Clear;
+    };
+
     explicit WBufferRenderer(QQuickItem *parent = nullptr);
     ~WBufferRenderer();
 
@@ -55,6 +62,11 @@ public:
     int sourceCount() const;
     QList<QQuickItem*> sourceList() const;
     void setSourceList(QList<QQuickItem *> sources, bool hideSource);
+
+    void setRenderTarget(const RenderTarget &target);
+    wlr_swapchain *prepareRenderTarget();
+    void requestOffscreenRender(const QRectF &sourceRect);
+    void cancelOffscreenRender();
 
     bool cacheBuffer() const;
     void setCacheBuffer(bool newCacheBuffer);
@@ -89,6 +101,8 @@ Q_SIGNALS:
     void cacheBufferChanged();
     void beforeRendering();
     void afterRendering();
+    // Buffer is locked for synchronous receivers; null means rendering failed.
+    void offscreenRenderFinished(wlr_buffer *buffer);
 
 protected:
     wlr_buffer *beginRender(const QSize &pixelSize, qreal devicePixelRatio,
@@ -100,6 +114,12 @@ protected:
     void componentComplete() override;
 
 private:
+    wlr_buffer *beginOffscreenRender();
+    bool ensureSwapchain(wlr_renderer *renderer, wlr_allocator *allocator,
+                         const QSize &size, uint32_t format);
+    wlr_buffer *beginRenderBuffer(wlr_renderer *renderer, const QSize &size, qreal devicePixelRatio,
+                                  RenderFlags flags, WGlobal::ColorContentsMode mode);
+
     inline WOutputRenderWindow *renderWindow() const {
         return qobject_cast<WOutputRenderWindow*>(window());
     }
@@ -125,6 +145,7 @@ private:
     QSGRenderer *ensureRenderer(int sourceIndex, QSGRenderContext *rc);
 
     WUniquePointer<wlr_swapchain> m_swapchain;
+    RenderTarget m_target;
     WRenderHelper *m_renderHelper = nullptr;
     WPointer<wlr_buffer> m_lastBuffer;
 
